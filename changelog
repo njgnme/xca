@@ -1,3 +1,72 @@
+xca 2.3.0 Wed Apr 29 2020
+
+ * Close #191 OID LN differs warning popups at startup
+ * Close #189 Database compaction #189
+ * Improve PKCS11 library loading for portable app
+ * Refactor native separators / and \ on windows.
+ * Support TLS encrypted MariaDB and PostgreSQL connection
+ * Close #182: UI not using Windows native theme in 2.2.1 portable
+ * Close #70: cant open ics file in ical on macos mojave
+ * Close #72: Add checkbox for OCSP staple feature
+ * Use DESTDIR instead of destdir when installing. Follows autotools convention.
+ * Close #172 #46: Multiple OCSP Responders
+ * Close #170 xca-portable-2.2.1 cannot change language
+ * Fix certificate assignment when importing a CA certificate
+ * Close #163: Show key type/size on column of Certificates tab
+
+xca 2.2.1 Thu Jan 30 2020
+
+ * Close #159 Opening existing database
+
+xca 2.2.0 Wed Jan 29 2020
+
+ * Switch to MSI installer
+ * Close #129 Unattended Installation
+ * Rename HTTPS templates to TLS and support KU/EKU extensions needed by OpenVPN
+ * Close #93 Default output folder / Improve Portable App usability
+ * Improve EC Curve selection for key generation.
+ * Close #21 Support for ODBC (MSSQL)
+ * Close #136 Provide 64bit version of xca
+ * Close #156 secp256k1, secp256r1 and NIST-P256
+ * Transfer Key Usage and Extended Key Usage critical flags
+ * Improve item loading. Inspired by #153
+ * Add japanese translation
+ * Close #138: Portable Version does not remember paths
+ * Close #83: Token selection should not insist on name or serial of the token
+ * Close #95: Copy mysql and psql windows dll files into portable app
+ * Close #144: Database export has issues with wildcards in internal names
+ * Close #143: Hotkey for import
+ * Close #140: Certificate renewal with option to preserved serial number
+ * Fix possible XCA crash
+ * Add Dutch translation
+ * Add Chinese translation
+ * Add Italian language
+ * CLose #120: Mark signed a request doesn't work
+ * Close #119: Rename "PostgreSQL 6 and 7" to just "PostgreSQL"
+ * Close #116: Duplicate extensions erroneously shown
+ * Close #114: SAN - IPv6 address input not working
+ * Close #68 Generating large DH params freezes UI
+ * Support concurrent database access.
+ * Close #91: Change order of "PKCS#11 provider"
+ * Extend PEM files by human readable information about the item
+ * Support ecdsa SSH public keys
+ * Close #98 Add comment at import/export RSA keys from/to SSH public key
+ * Close #101: Finish Rename with Enter shows Property Dialog
+ * Close #104: Also show sha256 digests of public keys
+ * Close #82: Renew CA ROOT Cert
+ * Verify imported keys thoroughly
+
+xca 2.1.2 Wed Nov 07 2018
+
+ * Close #40 macOS: Crash after xca v2.0.1 quit
+ * Close #37: XCA 2: EVP_DecryptFinal_ex:bad decrypt
+ * Close #74: Exiting XCA 2.1.1 corrupts database
+ * Make PKCS11 libs, working dir and main-window size host-dependent
+ * Support for XCA as portable App
+ * Close #69 Library not loaded: @rpath/ contains local directory
+ * Close #60: Fix MacOSX 2.1.1 binary
+ * Add new maintained languages: Polish, Spanish, Portuguese
+
 xca 2.1.1 Thu Sep 13 2018
 
  * Allow manual override of the CSR signed flag

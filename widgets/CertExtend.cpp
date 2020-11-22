@@ -10,7 +10,7 @@
 #include "lib/base.h"
 #include "lib/func.h"
 #include "widgets/validity.h"
-#include "widgets/MainWindow.h"
+#include "widgets/XcaWarning.h"
 #include <QLabel>
 #include <QLineEdit>
 #include <QComboBox>
@@ -23,7 +23,7 @@ CertExtend::CertExtend(QWidget *parent, pki_x509 *s)
 {
 	setupUi(this);
 	setWindowTitle(XCA_TITLE);
-	image->setPixmap(*MainWindow::certImg);
+	image->setPixmap(QPixmap(":certImg"));
 	validNumber->setText("1");
 	validRange->setCurrentIndex(2);
 	on_applyTime_clicked();
@@ -39,13 +39,13 @@ void CertExtend::on_applyTime_clicked()
 
 void CertExtend::accept()
 {
-	if (notBefore->getDate() < signer->getNotBefore()) {
+	if (signer && notBefore->getDate() < signer->getNotBefore()) {
 		QString text = tr("The certificate will be earlier valid than the signer. This is probably not what you want.");
 		xcaWarning msg(this, text);
-		msg.addButton(QMessageBox::Ok)->setText(tr("Edit dates"));
-		msg.addButton(QMessageBox::Close)->setText(tr("Abort rollout"));
-		msg.addButton(QMessageBox::Apply)->setText(tr("Continue rollout"));
-		msg.addButton(QMessageBox::Yes)->setText(tr("Adjust date and continue"));
+		msg.addButton(QMessageBox::Ok, tr("Edit dates"));
+		msg.addButton(QMessageBox::Close, tr("Abort rollout"));
+		msg.addButton(QMessageBox::Apply, tr("Continue rollout"));
+		msg.addButton(QMessageBox::Yes, tr("Adjust date and continue"));
 		switch (msg.exec())
 		{
 			case QMessageBox::Ok:
@@ -60,14 +60,14 @@ void CertExtend::accept()
 				notBefore->setDate(signer->getNotBefore());
 		}
 	}
-	if (notAfter->getDate() > signer->getNotAfter() &&
+	if (signer && notAfter->getDate() > signer->getNotAfter() &&
 				!noWellDefinedExpDate->isChecked()) {
 		QString text = tr("The certificate will be longer valid than the signer. This is probably not what you want.");
 		xcaWarning msg(this, text);
-		msg.addButton(QMessageBox::Ok)->setText(tr("Edit dates"));
-		msg.addButton(QMessageBox::Close)->setText(tr("Abort rollout"));
-		msg.addButton(QMessageBox::Apply)->setText(tr("Continue rollout"));
-		msg.addButton(QMessageBox::Yes)->setText(tr("Adjust date and continue"));
+		msg.addButton(QMessageBox::Ok, tr("Edit dates"));
+		msg.addButton(QMessageBox::Close, tr("Abort rollout"));
+		msg.addButton(QMessageBox::Apply, tr("Continue rollout"));
+		msg.addButton(QMessageBox::Yes, tr("Adjust date and continue"));
 		switch (msg.exec())
 		{
 			case QMessageBox::Ok:

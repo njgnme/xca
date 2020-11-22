@@ -8,54 +8,36 @@
 
 //#define MDEBUG
 #include "MainWindow.h"
+#include "XcaApplication.h"
 #include "ImportMulti.h"
-#include "lib/Passwd.h"
-#include "lib/entropy.h"
-
-#include <openssl/rand.h>
+#include "dhgen.h"
 
 #include <QApplication>
 #include <QClipboard>
-#include <QMessageBox>
+#include <QFileDialog>
 #include <QLabel>
-#include <QPushButton>
-#include <QListView>
 #include <QLineEdit>
 #include <QTextBrowser>
 #include <QStatusBar>
 #include <QList>
 #include <QTimer>
+#include <QThread>
 #include <QMimeData>
 #include <QInputDialog>
 
+#include <openssl/err.h>
+
+#include "lib/Passwd.h"
+#include "lib/database_model.h"
 #include "lib/exception.h"
 #include "lib/pki_evp.h"
-#include "lib/pki_scard.h"
-#include "lib/pki_pkcs12.h"
 #include "lib/pki_multi.h"
-#include "lib/load_obj.h"
-#include "lib/pass_info.h"
-#include "lib/func.h"
-#include "lib/pkcs11.h"
-#include "lib/builtin_curves.h"
+#include "lib/pki_scard.h"
 #include "XcaDialog.h"
+#include "XcaWarning.h"
 #include "PwDialog.h"
 #include "OpenDb.h"
-
-QPixmap *MainWindow::keyImg = NULL, *MainWindow::csrImg = NULL,
-	*MainWindow::certImg = NULL, *MainWindow::tempImg = NULL,
-	*MainWindow::nsImg = NULL, *MainWindow::revImg = NULL,
-	*MainWindow::appIco = NULL, *MainWindow::scardImg = NULL,
-	*MainWindow::doneIco = NULL, *MainWindow::warnIco = NULL;
-
-db_key *MainWindow::keys = NULL;
-db_x509req *MainWindow::reqs = NULL;
-db_x509	*MainWindow::certs = NULL;
-db_temp	*MainWindow::temps = NULL;
-db_crl	*MainWindow::crls = NULL;
-
-NIDlist *MainWindow::eku_nid = NULL;
-NIDlist *MainWindow::dn_nid = NULL;
+#include "OidResolver.h"
 
 OidResolver *MainWindow::resolver = NULL;
 
@@ -64,16 +46,6 @@ void MainWindow::enableTokenMenu(bool enable)
 	foreach(QWidget *w, scardList) {
 		w->setEnabled(enable);
 	}
-}
-
-void MainWindow::load_engine()
-{
-	try {
-		pkcs11::load_libs(Settings["pkcs11path"], false);
-	} catch (errorEx &err) {
-		Error(err);
-	}
-	enableTokenMenu(pkcs11::loaded());
 }
 
 void MainWindow::initResolver()
@@ -92,8 +64,7 @@ void MainWindow::initResolver()
 		resolver->searchOid(search);
 }
 
-MainWindow::MainWindow(QWidget *parent)
-	:QMainWindow(parent)
+MainWindow::MainWindow() : QMainWindow()
 {
 	dbindex = new QLabel();
 	dbindex->setFrameStyle(QFrame::Plain | QFrame::NoFrame);
@@ -105,6 +76,7 @@ MainWindow::MainWindow(QWidget *parent)
 	setupUi(this);
 	setWindowTitle(XCA_TITLE);
 
+	OpenDb::checkSqLite();
 	initResolver();
 
 	wdList << keyButtons << reqButtons << certButtons <<
@@ -112,7 +84,7 @@ MainWindow::MainWindow(QWidget *parent)
 
 	QStringList drivers = QSqlDatabase::drivers();
 	foreach(QString driver, drivers) {
-//		QSqlDatabase d = QSqlDatabase::addDatabase(driver, driver +"_C");
+		QSqlDatabase d = QSqlDatabase::addDatabase(driver, driver +"_C");
 		qDebug() << "DB driver:" << driver;
 	}
 
@@ -138,23 +110,33 @@ MainWindow::MainWindow(QWidget *parent)
 	EVP_add_digest_alias(SN_sha256,SN_dsa_with_SHA256);
 	EVP_add_digest_alias(SN_sha384,SN_ecdsa_with_SHA384);
 	EVP_add_digest_alias(SN_sha512,SN_ecdsa_with_SHA512);
-	/* read in all our own OIDs */
-	initOIDs();
-
-	eku_nid = read_nidlist("eku.txt");
-	dn_nid = read_nidlist("dn.txt");
 
 	setAcceptDrops(true);
 
 	searchEdit = new QLineEdit();
 	searchEdit->setPlaceholderText(tr("Search"));
 
-	keyView->setMainwin(this, searchEdit);
-	reqView->setMainwin(this, searchEdit);
-	certView->setMainwin(this, searchEdit);
-	tempView->setMainwin(this, searchEdit);
-	crlView->setMainwin(this, searchEdit);
-	keys = NULL; reqs = NULL; certs = NULL; temps = NULL; crls = NULL;
+	keyView->setIconSize(QPixmap(":keyIco").size());
+	reqView->setIconSize(QPixmap(":reqIco").size());
+	certView->setIconSize(QPixmap(":validcertIco").size());
+	tempView->setIconSize(QPixmap(":templateIco").size());
+	crlView->setIconSize(QPixmap(":crlIco").size());
+
+	views << keyView << reqView << certView << crlView << tempView;
+
+	foreach(XcaTreeView *v, views)
+		v->setMainwin(this, searchEdit);
+
+	dhgen = NULL;
+	dhgenBar = new QProgressBar();
+	check_oom(dhgenBar);
+	dhgenBar->setMinimum(0);
+	dhgenBar->setMaximum(0);
+
+	enum open_result result = Database.isOpen() ? init_database() :
+				      init_database(QString());
+	if (result == pw_exit)
+		throw pw_exit;
 }
 
 void MainWindow::dropEvent(QDropEvent *event)
@@ -184,21 +166,8 @@ void MainWindow::openURLs(QStringList &files)
 
 void MainWindow::openURLs()
 {
-	QStringList failed;
-	QString s;
-	ImportMulti *dlgi = new ImportMulti(this);
-
-	foreach(s, urlsToOpen) {
-		int ret;
-		pki_multi *pki = probeAnything(s, &ret);
-		if (ret)
-			failed << s;
-		else
-			dlgi->addItem(pki);
-	}
+	importAnything(urlsToOpen);
 	urlsToOpen.clear();
-	dlgi->execute(1, failed);
-	delete dlgi;
 }
 
 void MainWindow::dragEnterEvent(QDragEnterEvent *event)
@@ -221,149 +190,23 @@ void MainWindow::setItemEnabled(bool enable)
 	foreach(QAction *a, acList) {
 		a->setEnabled(enable);
 	}
-	enableTokenMenu(pkcs11::loaded());
-}
-
-/* creates a new nid list from the given filename */
-NIDlist *MainWindow::read_nidlist(QString name)
-{
-	NIDlist nl;
-	name = QDir::separator() + name;
-
-	/* first try $HOME/xca/ */
-	nl = readNIDlist(getUserSettingsDir() + name);
-#if !defined(Q_OS_WIN32)
-#if !defined(Q_OS_MAC)
-	if (nl.count() == 0){
-		/* next is /etx/xca/... */
-		nl = readNIDlist(QString(ETC) + name);
-	}
-#endif
-#endif
-	if (nl.count() == 0) {
-		/* look at /usr/(local/)share/xca/ */
-		nl = readNIDlist(getPrefix() + name);
-	}
-	return new NIDlist(nl);
+	enableTokenMenu(pkcs11::libraries.loaded());
 }
 
 void MainWindow::init_images()
 {
-	keyImg = loadImg("bigkey.png");
-	csrImg = loadImg("bigcsr.png");
-	certImg = loadImg("bigcert.png");
-	tempImg = loadImg("bigtemp.png");
-	nsImg = loadImg("netscape.png");
-	revImg = loadImg("bigcrl.png");
-	scardImg = loadImg("bigscard.png");
-	appIco = loadImg("key.xpm");
-	doneIco = loadImg("done.png");
-	warnIco = loadImg("warn.png");
-	bigKey->setPixmap(*keyImg);
-	bigCsr->setPixmap(*csrImg);
-	bigCert->setPixmap(*certImg);
-	bigTemp->setPixmap(*tempImg);
-	bigRev->setPixmap(*revImg);
-	setWindowIcon(*appIco);
-	pki_evp::icon[0] = loadImg("key.png");
-	pki_evp::icon[1] = loadImg("halfkey.png");
-	pki_scard::icon[0] = loadImg("scard.png");
-	pki_x509req::icon[0] = loadImg("req.png");
-	pki_x509req::icon[1] = loadImg("reqkey.png");
-	pki_x509req::icon[2] = doneIco;
-	pki_x509::icon[0] = loadImg("validcert.png");
-	pki_x509::icon[1] = loadImg("validcertkey.png");
-	pki_x509::icon[2] = loadImg("invalidcert.png");
-	pki_x509::icon[3] = loadImg("invalidcertkey.png");
-	pki_x509::icon[4] = doneIco;
-	pki_x509super::icon[0] = doneIco;
-	pki_temp::icon = loadImg("template.png");
-	pki_crl::icon = loadImg("crl.png");
-}
-
-void MainWindow::read_cmdline(int argc, char *argv[])
-{
-	int cnt = 1, opt = 0, force_load = 0, export_index = 0;
-	char *arg = NULL;
-	exitApp = 0;
-	QStringList failed;
-	ImportMulti *dlgi = new ImportMulti(this);
-	while (cnt < argc) {
-		arg = argv[cnt];
-		if (arg[0] == '-') { // option
-			opt = 1;
-			switch (arg[1]) {
-				case 'c':
-				case 'r':
-				case 'k':
-				case 'p':
-				case '7':
-				case 'l':
-				case 't':
-				case 'P':
-					break;
-				case 'd':
-					force_load=1;
-					break;
-				case 'i':
-					export_index=1;
-					break;
-				case 'I':
-					export_index=2;
-					break;
-				case 'v':
-					cmd_version();
-					opt=0;
-					break;
-				case 'x':
-					exitApp = 1;
-					opt=0;
-					break;
-				case 'h':
-					cmd_help(NULL);
-					opt=0;
-					break;
-				default:
-					 cmd_help(CCHAR(tr("no such option: %1").arg(arg)));
-			}
-			if (arg[2] != '\0' && opt==1) {
-				 arg+=2;
-			} else {
-				cnt++;
-				continue;
-			}
-		}
-		QString file = filename2QString(arg);
-		if (force_load) {
-			if (changeDB(file) == 2)
-				exitApp = 1;
-			force_load = 0;
-		} else if (export_index) {
-			if (exportIndex(file, (export_index == 2)) == 2)
-				exitApp = 1;
-			export_index = 0;
-		} else {
-			int ret;
-			pki_multi *pki = probeAnything(file, &ret);
-			if (!pki) {
-				if (ret == 2)
-					exitApp = 1;
-				else if (ret == 1)
-					failed << file;
-			}
-			dlgi->addItem(pki);
-		}
-		cnt++;
-	}
-	dlgi->execute(1, failed); /* force showing of import dialog */
-	if (dlgi->result() == QDialog::Rejected)
-		exitApp = 1;
-	delete dlgi;
+	bigKey->setPixmap(QPixmap(":keyImg"));
+	bigCsr->setPixmap(QPixmap(":csrImg"));
+	bigCert->setPixmap(QPixmap(":certImg"));
+	bigTemp->setPixmap(QPixmap(":tempImg"));
+	bigRev->setPixmap(QPixmap(":revImg"));
+	setWindowIcon(QPixmap(":appIco"));
 }
 
 void MainWindow::loadPem()
 {
 	load_pem l;
+	db_key *keys = Database.model<db_key>();
 	if (keys)
 		keys->load_default(l);
 }
@@ -376,24 +219,17 @@ bool MainWindow::pastePem(QString text, bool silent)
 		return false;
 
 	pki_multi *pem = NULL;
-	ImportMulti *dlgi = NULL;
 	try {
 		pem = new pki_multi();
-		dlgi = new ImportMulti(this);
-		pem->fromPEMbyteArray(pemdata, QString("paste"));
-		success = pem->count() != 0;
-		dlgi->addItem(pem);
-		pem = NULL;
-		dlgi->execute(1);
+		pem->fromPEMbyteArray(pemdata, QString());
+		success = pem->failed_files.count() == 0;
+		importMulti(pem, 1);
 	}
 	catch (errorEx &err) {
-		if (!silent)
-			Error(err);
-	}
-	if (dlgi)
-		delete dlgi;
-	if (pem)
 		delete pem;
+		if (!silent)
+			XCA_ERROR(err);
+	}
 	return success;
 }
 
@@ -427,7 +263,7 @@ void MainWindow::pastePem()
 void MainWindow::initToken()
 {
 	bool ok;
-	if (!pkcs11::loaded())
+	if (!pkcs11::libraries.loaded())
 		return;
 	try {
 		pkcs11 p11;
@@ -462,13 +298,13 @@ void MainWindow::initToken()
 			return;
 		p11.initToken(slot, pin.constUchar(), pin.size(), label);
 	} catch (errorEx &err) {
-		Error(err);
+		XCA_ERROR(err);
         }
 }
 
 void MainWindow::changePin(bool so)
 {
-	if (!pkcs11::loaded())
+	if (!pkcs11::libraries.loaded())
 		return;
 	try {
 		pkcs11 p11;
@@ -478,7 +314,7 @@ void MainWindow::changePin(bool so)
 			return;
 		p11.changePin(slot, so);
 	} catch (errorEx &err) {
-		Error(err);
+		XCA_ERROR(err);
         }
 }
 
@@ -489,7 +325,7 @@ void MainWindow::changeSoPin()
 
 void MainWindow::initPin()
 {
-	if (!pkcs11::loaded())
+	if (!pkcs11::libraries.loaded())
 		return;
 	try {
 		pkcs11 p11;
@@ -499,7 +335,7 @@ void MainWindow::initPin()
 			return;
 		p11.initPin(slot);
 	} catch (errorEx &err) {
-		Error(err);
+		XCA_ERROR(err);
         }
 }
 
@@ -512,7 +348,7 @@ void MainWindow::manageToken()
 	pki_x509 *cert = NULL;
 	ImportMulti *dlgi = NULL;
 
-	if (!pkcs11::loaded())
+	if (!pkcs11::libraries.loaded())
 		return;
 
 	try {
@@ -541,7 +377,7 @@ void MainWindow::manageToken()
 				card->setMech_list(ml);
 				dlgi->addItem(card);
 			} catch (errorEx &err) {
-				Error(err);
+				XCA_ERROR(err);
 				delete card;
 			}
 			card = NULL;
@@ -557,7 +393,7 @@ void MainWindow::manageToken()
 				cert->load_token(p11, objects[j]);
 				dlgi->addItem(cert);
 			} catch (errorEx &err) {
-				Error(err);
+				XCA_ERROR(err);
 				delete cert;
 			}
 			cert = NULL;
@@ -569,26 +405,18 @@ void MainWindow::manageToken()
 			dlgi->execute(true);
 		}
 	} catch (errorEx &err) {
-		Error(err);
+		XCA_ERROR(err);
         }
-	if (card)
-		delete card;
-	if (cert)
-		delete cert;
-	if (dlgi)
-		delete dlgi;
+	delete card;
+	delete cert;
+	delete dlgi;
 }
 
 MainWindow::~MainWindow()
 {
-	close_database();
 	ERR_free_strings();
 	EVP_cleanup();
 	OBJ_cleanup();
-	if (eku_nid)
-		delete eku_nid;
-	if (dn_nid)
-		delete dn_nid;
 	delete dbindex;
 #ifdef MDEBUG
 	fprintf(stderr, "Memdebug:\n");
@@ -598,21 +426,17 @@ MainWindow::~MainWindow()
 
 void MainWindow::closeEvent(QCloseEvent *e)
 {
-	if (resolver) {
-		delete resolver;
+	if (dhgen) {
+		if (!XCA_YESNO("Abort Diffie-Hellmann parameter generation?")){
+			e->ignore();
+			return;
+		}
+		dhgen->terminate();
 	}
+	delete resolver;
+	resolver = NULL;
+	close_database();
 	QMainWindow::closeEvent(e);
-}
-
-QString makeSalt(void)
-{
-	QString s = "T";
-	unsigned char rand[8];
-
-	Entropy::get(rand, sizeof rand);
-	for (unsigned i=0; i< sizeof rand; i++)
-		s += QString("%1").arg(rand[i]);
-	return s;
 }
 
 int MainWindow::checkOldGetNewPass(Passwd &pass)
@@ -651,16 +475,16 @@ void MainWindow::changeDbPass()
 	if (!checkOldGetNewPass(pass))
 		return;
 
-	QString salt = makeSalt();
+	QString salt = Entropy::makeSalt();
 	QString passhash = pki_evp::sha512passwT(pass, salt);
-	QList<pki_evp*> key_list = keys->sqlSELECTpki<pki_evp>(
+	QList<pki_evp*> key_list = Store.sqlSELECTpki<pki_evp>(
 		"SELECT item FROM private_keys WHERE ownPass=0");
 
 	try {
 		Transaction;
 		if (!TransBegin()) {
 			errorEx e(tr("Transaction start failed"));
-			Error(e);
+			XCA_ERROR(e);
 			return;
 		}
 		foreach(pki_evp *key, key_list) {
@@ -674,152 +498,143 @@ void MainWindow::changeDbPass()
 		pki_evp::passHash = passhash;
 		pki_evp::passwd = pass;
 	} catch (errorEx &e) {
-		Error(e);
+		XCA_ERROR(e);
 	}
-}
-
-int MainWindow::initPass(QString dbName)
-{
-	QString passhash = Settings["pwhash"];
-	return initPass(dbName, passhash);
-}
-
-static void pwhash_upgrade()
-{
-	/* Start automatic update from sha512 to sha512*8000
-	 * if the password is correct. The old sha512 hash does
-	 * start with 'S', while the new hash starts with T. */
-
-	/* Start automatic update from md5 to salted sha512*8000
-	 * if the password is correct. The md5 hash does not
-	 * start with 'S' or 'T, but with a hex-digit */
-	if (pki_evp::passHash.startsWith("T")) {
-		/* Fine, current hash function used. */
-		return;
-	}
-	if (pki_evp::sha512passwd(pki_evp::passwd,
-				pki_evp::passHash) == pki_evp::passHash ||
-	    pki_evp::md5passwd(pki_evp::passwd) == pki_evp::passHash)
-	{
-		QString salt = makeSalt();
-		pki_evp::passHash = pki_evp::sha512passwT(
-				pki_evp::passwd, salt);
-	}
-}
-
-int MainWindow::initPass(QString dbName, QString passhash)
-{
-	pki_evp::passHash = QString();
-	QString salt, pass;
-	int ret;
-
-	pass_info p(tr("New Password"), tr("Please enter a password, "
-			"that will be used to encrypt your private keys "
-			"in the database:\n%1").
-			arg(compressFilename(dbName)), this);
-
-	pki_evp::passHash = passhash;
-	if (pki_evp::passHash.isEmpty()) {
-		ret = PwDialog::execute(&p, &pki_evp::passwd, true, true);
-		if (ret != 1)
-			return ret;
-		salt = makeSalt();
-		pki_evp::passHash =pki_evp::sha512passwT(pki_evp::passwd,salt);
-		Settings["pwhash"] = pki_evp::passHash;
-	} else {
-		pwhash_upgrade();
-		ret = 0;
-		while (pki_evp::sha512passwT(pki_evp::passwd, pki_evp::passHash)
-				!= pki_evp::passHash)
-		{
-			if (ret)
-				XCA_WARN(
-				tr("Password verify error, please try again"));
-			p.setTitle(tr("Password"));
-			p.setDescription(tr("Please enter the password for unlocking the database:\n%1").arg(compressFilename(dbName)));
-			ret = PwDialog::execute(&p, &pki_evp::passwd,
-						false, true);
-			if (ret != 1) {
-				pki_evp::passwd = QByteArray();
-				return ret;
-			}
-			pwhash_upgrade();
-		}
-	}
-	if (pki_evp::passwd.isNull())
-		pki_evp::passwd = "";
-	return 1;
-}
-
-void MainWindow::Error(errorEx &err)
-{
-	if (err.isEmpty())
-		 return;
-	QString msg =  tr("The following error occurred:") + "\n" + err.getString();
-	xcaWarning box(NULL, msg);
-	box.addButton(QMessageBox::Apply)->setText(tr("Copy to Clipboard"));
-	box.addButton(QMessageBox::Ok);
-	if (box.exec() == QMessageBox::Apply) {
-		QClipboard *cb = QApplication::clipboard();
-		cb->setText(msg);
-		if (cb->supportsSelection())
-			cb->setText(msg, QClipboard::Selection);
-	}
-}
-
-void MainWindow::connNewX509(NewX509 *nx)
-{
-	connect(nx, SIGNAL(genKey(QString)),
-		keys, SLOT(newItem(QString)));
-	connect(keys, SIGNAL(keyDone(pki_key*)),
-		nx, SLOT(newKeyDone(pki_key*)));
-	connect(nx, SIGNAL(showReq(pki_base*)),
-		reqs, SLOT(showPki(pki_base*)));
-	connect(reqs, SIGNAL(pkiChanged(pki_base*)),
-		nx, SLOT(itemChanged(pki_base*)));
 }
 
 void MainWindow::importAnything(QString file)
 {
-	int ret;
+	importAnything(QStringList(file));
+}
+
+void MainWindow::importAnything(const QStringList &files)
+{
+	pki_multi *multi = new pki_multi();
+
+	foreach(QString s, files)
+		multi->probeAnything(s);
+
+	importMulti(multi, 1);
+}
+
+void MainWindow::importMulti(pki_multi *multi, int force)
+{
+	if (!multi)
+		return;
 	ImportMulti *dlgi = new ImportMulti(this);
-	QStringList failed;
-	pki_multi *pki = probeAnything(file, &ret);
-	if (ret)
-		failed << file;
-	else
-		dlgi->addItem(pki);
-	dlgi->execute(1, failed);
+	dlgi->addItem(multi);
+	dlgi->execute(force, multi->failed_files);
 	delete dlgi;
 }
 
-pki_multi *MainWindow::probeAnything(QString file, int *ret)
+void MainWindow::openRemoteSqlDB()
 {
-	if (ret)
-		*ret = 0;
-	pki_multi *pki = NULL;
+	OpenDb *opendb = new OpenDb(this, Database.name());
+	QString descriptor;
+	Passwd pass;
+	DbMap params;
 
+	if (opendb->exec()) {
+		descriptor = opendb->getDescriptor();
+		pass = opendb->dbPassword->text().toLatin1();
+		params = database_model::splitRemoteDbName(descriptor);
+	}
+	delete opendb;
+
+	if (descriptor.isEmpty())
+		return;
+
+	init_database(descriptor, pass);
+}
+
+enum open_result MainWindow::init_database(const QString &name,
+					   const Passwd &pass)
+{
+	close_database();
 	try {
-		if (file.endsWith(".xdb") ||
-		    !OpenDb::splitRemoteDbName(file).isEmpty())
-		{
-			int r = init_database(file);
-			if (ret)
-				*ret = r;
-			return pki;
-		}
-		pki = new pki_multi();
-		pki->probeAnything(file);
+		Database.open(name, pass);
+		return init_database();
 	} catch (errorEx &err) {
-		Error(err);
+		XCA_ERROR(err);
+		return open_abort;
+	} catch (enum open_result r) {
+		return r;
 	}
-	if (!pki->count()) {
-		delete pki;
-		pki = NULL;
-		if (ret)
-			*ret = 1;
+	return pw_ok;
+}
+
+enum open_result MainWindow::init_database()
+{
+	if (!Database.isOpen())
+		return open_abort;
+
+	if (!database_model::isRemoteDB(Database.name()))
+		homedir = QFileInfo(Database.name()).canonicalPath();
+
+	setItemEnabled(true);
+	dbindex->setText(tr("Database") + ": " +
+			 compressFilename(Database.name()));
+	set_geometry(Settings["mw_geometry"]);
+
+	if (pki_evp::passwd.isNull())
+		XCA_INFO(tr("Using or exporting private keys will not be possible without providing the correct password"));
+
+	enableTokenMenu(pkcs11::libraries.loaded());
+
+	hashBox hb(this);
+	if (hb.isInsecure()) {
+		XCA_WARN(tr("The currently used default hash '%1' is insecure. Please select at least 'SHA 224' for security reasons.").arg(hb.currentHashName()));
+		setOptions();
 	}
-	return pki;
+
+	keyView->setModel(Database.model<db_key>());
+	reqView->setModel(Database.model<db_x509req>());
+	certView->setModel(Database.model<db_x509>());
+	tempView->setModel(Database.model<db_temp>());
+	crlView->setModel(Database.model<db_crl>());
+
+	searchEdit->setText("");
+	searchEdit->show();
+	statusBar()->addWidget(searchEdit, 1);
+
+	connect(tempView, SIGNAL(newCert(pki_temp *)),
+		Database.model<db_x509>(), SLOT(newCert(pki_temp *)));
+	connect(tempView, SIGNAL(newReq(pki_temp *)),
+		Database.model<db_x509req>(), SLOT(newItem(pki_temp *)));
+
+	return pw_ok;
+}
+
+void MainWindow::set_geometry(QString geo)
+{
+	QStringList sl = geo.split(",");
+	if (sl.size() != 3)
+		return;
+	resize(sl[0].toInt(), sl[1].toInt());
+	int i = sl[2].toInt();
+	if (i != -1)
+		tabView->setCurrentIndex(i);
+}
+
+void MainWindow::close_database()
+{
+	if (!Database.isOpen())
+		return;
+
+	Settings["mw_geometry"] = QString("%1,%2,%3")
+			.arg(size().width())
+			.arg(size().height())
+			.arg(tabView->currentIndex());
+
+	history.addEntry(Database.name());
+	foreach(XcaTreeView *v, views)
+		v->setModel(NULL);
+	Database.close();
+
+	setItemEnabled(false);
+	dbindex->clear();
+	update_history_menu();
+	enableTokenMenu(pkcs11::libraries.loaded());
 }
 
 void MainWindow::exportIndex()
@@ -837,34 +652,41 @@ void MainWindow::exportIndexHierarchy()
 		this, XCA_TITLE, Settings["workingdir"]), true);
 }
 
-int MainWindow::exportIndex(QString fname, bool hierarchy)
+void MainWindow::exportIndex(const QString &fname, bool hierarchy) const
 {
 	qDebug() << fname << hierarchy;
-	if (fname.isEmpty())
-		return 1;
-	if (certs == NULL) {
-		open_default_db();
-		if (certs == NULL)
-			return 2;
-	}
+	if (fname.isEmpty() || !Database.isOpen())
+		return;
+	db_x509 *certs = Database.model<db_x509>();
 	certs->writeIndex(fname, hierarchy);
-	return 0;
+}
+
+void MainWindow::generateDHparamDone()
+{
+	statusBar()->removeWidget(dhgenBar);
+	errorEx e(dhgen->error);
+	if (e.isEmpty())
+		XCA_INFO(tr("Diffie-Hellman parameters saved as: %1")
+			.arg(dhgen->filename()));
+	else
+		XCA_ERROR(e);
+	dhgen->deleteLater();
+	dhgen = NULL;
 }
 
 void MainWindow::generateDHparam()
 {
-	DH *dh = NULL;
-	FILE *fp = NULL;
-	QProgressBar *bar = NULL;
 	bool ok;
-	int num = QInputDialog::getDouble(this, XCA_TITLE, tr("Diffie-Hellman parameters are needed for different applications, but not handled by XCA.\nPlease enter the DH parameter bits"),
-		1024, 1024, 4096, 0, &ok);
-#if OPENSSL_VERSION_NUMBER >= 0x10100000L
-	BN_GENCB *cb = NULL;
-#endif
+	int bits;
 
+	if (dhgen)
+		return;
+
+	bits = QInputDialog::getDouble(this, XCA_TITLE, tr("Diffie-Hellman parameters are needed for different applications, but not handled by XCA.\nPlease enter the DH parameter bits"),
+		1024, 1024, 4096, 0, &ok);
 	if (!ok)
 		return;
+
 	/*
 	 * 1024:   6 sec
 	 * 2048:  38 sec
@@ -873,69 +695,35 @@ void MainWindow::generateDHparam()
 
 	Entropy::seed_rng();
 	try {
-		QStatusBar *status = statusBar();
-		bar = new QProgressBar();
-		check_oom(bar);
-		bar->setMinimum(0);
-		bar->setMaximum(100);
-		status->addPermanentWidget(bar, 1);
-
-#if OPENSSL_VERSION_NUMBER >= 0x10100000L
-		cb = BN_GENCB_new();
-		if (!cb)
-			throw errorEx("");
-		BN_GENCB_set_old(cb, inc_progress_bar, bar);
-		dh = DH_new();
-		DH_generate_parameters_ex(dh, num, 2, cb);
-#else
-		dh = DH_generate_parameters(num, 2, inc_progress_bar, bar);
-#endif
-
-		status->removeWidget(bar);
-		openssl_error();
-
-		QString fname = QString("%1/dh%2.pem").arg(homedir).arg(num);
+		QString fname = QString("%1/dh%2.pem").arg(homedir).arg(bits);
 		fname = QFileDialog::getSaveFileName(this, QString(),
 			fname, tr("All files ( * )"), NULL);
 		if (fname == "")
 			throw errorEx("");
-		fp = fopen_write(fname);
-		if (fp == NULL) {
-			throw errorEx(tr("Error opening file: '%1': %2").
-				arg(fname).arg(strerror(errno)));
-		}
-		PEM_write_DHparams(fp, dh);
-		openssl_error();
+		dhgen = new DHgen(fname, bits);
+		check_oom(dhgen);
+		statusBar()->addPermanentWidget(dhgenBar, 1);
+		dhgenBar->show();
+		dhgen->start(QThread::LowestPriority);
+		connect(dhgen, SIGNAL(finished()),
+			this, SLOT(generateDHparamDone()));
 	} catch (errorEx &err) {
-		Error(err);
+		XCA_ERROR(err);
 	}
-	if (dh)
-		DH_free(dh);
-	if (fp)
-		fclose(fp);
-#if OPENSSL_VERSION_NUMBER >= 0x10100000L
-	if (cb)
-		BN_GENCB_free(cb);
-#endif
-	if (bar)
-		delete bar;
 }
 
 void MainWindow::changeEvent(QEvent *event)
 {
 	if (event->type() == QEvent::LanguageChange) {
-		QList<db_base*> models;
 		retranslateUi(this);
 		dn_translations_setup();
 		init_menu();
-		update_history_menu();
-		models << keys << reqs << certs << crls << temps;
-		foreach(db_base *model, models) {
-			if (model)
-				model->updateHeaders();
-		}
-		if (!currentDB.isEmpty())
-			dbindex->setText(tr("Database") + ": " + currentDB);
+		foreach(db_base *model, Database.getModels())
+			model->updateHeaders();
+
+		if (Database.isOpen())
+			dbindex->setText(tr("Database") + ": " +
+					Database.name());
 		searchEdit->setPlaceholderText(tr("Search"));
 	}
 	QMainWindow::changeEvent(event);
@@ -947,16 +735,15 @@ void MainWindow::keyPressEvent(QKeyEvent *e)
 		QMainWindow::keyPressEvent(e);
 		return;
 	}
-	int siz = XCA_application::tableFont.pointSize();
-	QList<XcaTreeView*> views;
+	int siz = XcaApplication::tableFont.pointSize();
 
 	switch (e->key()) {
 	case Qt::Key_Plus:
-		XCA_application::tableFont.setPointSize(siz +1);
+		XcaApplication::tableFont.setPointSize(siz +1);
 		break;
 	case Qt::Key_Minus:
 		if (siz > 4) {
-			XCA_application::tableFont.setPointSize(siz -1);
+			XcaApplication::tableFont.setPointSize(siz -1);
 		}
 		break;
 	case Qt::Key_V:
@@ -969,7 +756,6 @@ void MainWindow::keyPressEvent(QKeyEvent *e)
 		QMainWindow::keyPressEvent(e);
 		return;
 	}
-	views << keyView << reqView << certView << crlView << tempView;
 	foreach(XcaTreeView *v, views) {
 		if (v) {
 			v->header()->resizeSections(
@@ -978,4 +764,20 @@ void MainWindow::keyPressEvent(QKeyEvent *e)
 		}
 	}
 	update();
+}
+
+void MainWindow::dump_database()
+{
+	QString dirname = QFileDialog::getExistingDirectory(
+				NULL, XCA_TITLE, Settings["workingdir"]);
+	try {
+		Database.dump(dirname);
+	} catch (errorEx &err) {
+		XCA_ERROR(err);
+	}
+}
+
+void MainWindow::default_database()
+{
+	Database.as_default();
 }

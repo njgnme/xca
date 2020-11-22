@@ -8,10 +8,6 @@
 #ifndef __DB_TOKEN_H
 #define __DB_TOKEN_H
 
-#include <QObject>
-#include <QPixmap>
-#include <QEvent>
-
 #include "pkcs11_lib.h"
 #include "db_base.h"
 
@@ -22,10 +18,10 @@ class db_token: public db_base
 	private:
 		slotid slot;
 	public:
-		db_token(MainWindow *mw);
+		db_token();
 		bool setData(const QModelIndex &index,
 			const QVariant &value, int role);
-		void setSlot(slotid s)
+		void setSlot(const slotid &s)
 		{
 			slot = s;
 		}

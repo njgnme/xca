@@ -1,6 +1,6 @@
 /* vi: set sw=4 ts=4:
  *
- * Copyright (C) 2001 - 2010 Christian Hohnstaedt.
+ * Copyright (C) 2001 - 2020 Christian Hohnstaedt.
  *
  * All rights reserved.
  */
@@ -9,6 +9,7 @@
 #include "x509name.h"
 #include "base.h"
 #include "func.h"
+#include "BioByteArray.h"
 #include <openssl/asn1.h>
 #include <openssl/err.h>
 #include "exception.h"
@@ -65,22 +66,16 @@ x509name &x509name::set(const STACK_OF(X509_NAME_ENTRY) *entries)
 
 QString x509name::oneLine(unsigned long flags) const
 {
-	QString ret;
-	long l;
-	const char *p;
-	BIO *mem = BIO_new(BIO_s_mem());
-	X509_NAME_print_ex(mem, xn, 0, flags);
-	l = BIO_get_mem_data(mem, &p);
-	ret = ret.fromUtf8(p,l);
-	BIO_free(mem);
-	return ret;
+	BioByteArray bba;
+	X509_NAME_print_ex(bba, xn, 0, flags);
+	return bba.qstring();
 }
 
 QString x509name::getEntryByNid(int nid) const
 {
 	int i = X509_NAME_get_index_by_NID(xn, nid, -1);
 	if (i < 0)
-		return QString::null;
+		return QString();
 	return getEntry(i);
 }
 
@@ -131,7 +126,7 @@ QString x509name::popEntryByNid(int nid)
 {
 	int i = X509_NAME_get_index_by_NID(xn, nid, -1);
 	if (i < 0)
-		return QString::null;
+		return QString();
 	QString n = getEntry(i);
 	X509_NAME_delete_entry(xn, i);
 	return n;
@@ -143,7 +138,7 @@ QString x509name::hash() const
 }
 
 /* 32 bit signed integer */
-unsigned long x509name::hashNum() const
+unsigned x509name::hashNum() const
 {
 	return X509_NAME_hash(xn) & 0x7fffffffL;
 }

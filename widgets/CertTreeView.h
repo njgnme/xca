@@ -14,20 +14,16 @@
 class CertTreeView: public X509SuperTreeView
 {
 	Q_OBJECT
-	db_x509 *certs;
+
+	db_x509 *certs() const
+	{
+		return dynamic_cast<db_x509*>(basemodel);
+	}
 
     public:
-	CertTreeView(QWidget *parent) : X509SuperTreeView(parent)
-	{
-		certs = NULL;
-	}
+	CertTreeView(QWidget *parent) : X509SuperTreeView(parent) { }
 	void fillContextMenu(QMenu *menu, QMenu *subExport,
 			const QModelIndex &index, QModelIndexList indexes);
-	void setModel(db_x509 *model=NULL)
-	{
-		certs = model;
-		X509SuperTreeView::setModel(model);
-	}
 
     public slots:
 	void changeView();

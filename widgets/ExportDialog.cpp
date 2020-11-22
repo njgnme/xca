@@ -8,6 +8,7 @@
 
 #include "ExportDialog.h"
 #include "MainWindow.h"
+#include "XcaWarning.h"
 #include "lib/base.h"
 
 #include <QComboBox>
@@ -17,22 +18,21 @@
 #include <QMessageBox>
 #include <QStringList>
 
-ExportDialog::ExportDialog(MainWindow *mw, QString title, QString filt,
-			pki_base *pki, QPixmap *img, QList<exportType> types)
-	:QDialog(mw)
+ExportDialog::ExportDialog(QWidget *w, const QString &title, const QString &filt,
+		pki_base *pki, const QPixmap &img, QList<exportType> types)
+	: QDialog(w)
 {
 	setupUi(this);
-	mainwin = mw;
 	setWindowTitle(XCA_TITLE);
 	if (pki)
 		descr->setText(pki->getIntName());
 	descr->setReadOnly(true);
-	image->setPixmap(*img);
+	image->setPixmap(img);
         label->setText(title);
 	if (pki) {
-		QString fn = Settings["workingdir"] + QDir::separator() +
+		QString fn = Settings["workingdir"] +
 			pki->getUnderlinedName() + "." + types[0].extension;
-		filename->setText(fn);
+		filename->setText(nativeSeparator(fn));
 	}
 	filter = filt + ";;" + tr("All files ( * )");
 
@@ -88,6 +88,8 @@ ExportDialog::ExportDialog(MainWindow *mw, QString title, QString filt,
 	help[exportType::Index] = tr("OpenSSL specific Certificate Index file as created by the 'ca' command and required by the OCSP tool");
 	help[exportType::vcalendar] = tr("vCalendar expiry reminder for the selected items");
 	help[exportType::vcalendar_ca] = tr("vCalendar expiry reminder containing all issued, valid certificates, the CA itself and the latest CRL");
+	help[exportType::PVK_private] = tr("Private key in Microsoft PVK format not encrypted");
+	help[exportType::PVK_encrypt] = tr("Encrypted private key in Microsoft PVK format");
 
 	on_exportFormat_highlighted(0);
 }
@@ -98,10 +100,8 @@ void ExportDialog::on_fileBut_clicked()
 		filename->text(), filter, NULL,
 		QFileDialog::DontConfirmOverwrite);
 
-	if (!s.isEmpty()) {
-		nativeSeparator(s);
-		filename->setText(s);
-	}
+	if (!s.isEmpty())
+		filename->setText(nativeSeparator(s));
 }
 
 void ExportDialog::on_exportFormat_activated(int selected)
@@ -127,14 +127,10 @@ bool ExportDialog::mayWriteFile(const QString &fname)
         if (QFile::exists(fname)) {
 		xcaWarning msg(NULL,
 			tr("The file: '%1' already exists!").arg(fname));
-		msg.addButton(QMessageBox::Ok)->setText(
-			tr("Overwrite"));
-		msg.addButton(QMessageBox::Cancel)->setText(
-			tr("Do not overwrite"));
+		msg.addButton(QMessageBox::Ok, tr("Overwrite"));
+		msg.addButton(QMessageBox::Cancel, tr("Do not overwrite"));
 		if (msg.exec() != QMessageBox::Ok)
-	        {
 			return false;
-	        }
 	}
 	return true;
 }
@@ -152,8 +148,7 @@ void ExportDialog::accept()
 		return;
 	}
 	if (mayWriteFile(fn)) {
-		Settings["workingdir"] = fn.mid(0, fn.lastIndexOf(
-							QRegExp("[/\\\\]")));
+		update_workingdir(fn);
 		QDialog::accept();
 	}
 }

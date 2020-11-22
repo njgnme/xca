@@ -10,13 +10,13 @@
 
 #include <QString>
 #include <QByteArray>
-#include <QTime>
+#include <QElapsedTimer>
 
 class Entropy
 {
     protected:
 	QString rnd;
-	static QTime timer;
+	static QElapsedTimer timer;
 	static unsigned char pool[512];
 	static unsigned pool_pos;
 	static unsigned seed_strength;
@@ -30,6 +30,7 @@ class Entropy
 	static int get(unsigned char *buf, int num);
 	static void seed_rng();
 	static unsigned strength();
+	static QString makeSalt(void);
 };
 
 #endif

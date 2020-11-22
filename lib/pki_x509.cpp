@@ -1,27 +1,23 @@
 /* vi: set sw=4 ts=4:
  *
- * Copyright (C) 2001 - 2014 Christian Hohnstaedt.
+ * Copyright (C) 2001 - 2020 Christian Hohnstaedt.
  *
  * All rights reserved.
  */
 
 
 #include "pki_x509.h"
+#include "pki_x509req.h"
 #include "pki_evp.h"
 #include "pki_scard.h"
+#include "pki_crl.h"
 #include "db_base.h"
 #include "func.h"
 #include "base.h"
 #include "exception.h"
 #include "pass_info.h"
-#include "widgets/MainWindow.h"
-#include <QMessageBox>
-#include <QDir>
-#include <openssl/rand.h>
-
 #include "openssl_compat.h"
-
-QPixmap *pki_x509::icon[5];
+#include "widgets/XcaWarning.h"
 
 pki_x509::pki_x509(X509 *c)
 	:pki_x509super()
@@ -32,12 +28,12 @@ pki_x509::pki_x509(X509 *c)
 }
 
 pki_x509::pki_x509(const pki_x509 *crt)
-	:pki_x509super(crt->desc)
+	:pki_x509super(crt)
 {
 	init();
 	cert = X509_dup(crt->cert);
 	pki_openssl_error();
-	psigner = crt->psigner;
+	issuerSqlId = crt->issuerSqlId;
 	setRefKey(crt->getRefKey());
 	caTemplateSqlId = crt->caTemplateSqlId;
 	revocation = crt->revocation;
@@ -46,7 +42,7 @@ pki_x509::pki_x509(const pki_x509 *crt)
 	pki_openssl_error();
 }
 
-pki_x509::pki_x509(const QString name)
+pki_x509::pki_x509(const QString &name)
 	:pki_x509super(name)
 {
 	init();
@@ -74,6 +70,17 @@ QString pki_x509::getMsg(msg_type msg) const
 	return pki_base::getMsg(msg);
 }
 
+void pki_x509::resetX509ReqCount() const
+{
+	QList<pki_x509req *> reqs = Store.sqlSELECTpki<pki_x509req>(
+		"SELECT item FROM x509super LEFT JOIN items ON items.id = x509super.item "
+		"WHERE key_hash=? AND items.type=?",
+		QList<QVariant>() << QVariant(pubHash()) << QVariant(x509_req));
+
+	foreach(pki_x509req *req, reqs)
+		req->resetX509count();
+}
+
 QSqlError pki_x509::insertSqlData()
 {
 	XSqlQuery q;
@@ -88,13 +95,15 @@ QSqlError pki_x509::insertSqlData()
 		  "VALUES (?, ?, ?, ?, ?, ?, ?)");
 	q.bindValue(0, sqlItemId);
 	q.bindValue(1, hash());
-	q.bindValue(2, (uint)getIssuerName().hashNum());
+	q.bindValue(2, getIssuerName().hashNum());
 	q.bindValue(3, getSerial().toHex());
 	q.bindValue(4, signer ? signer->getSqlItemId() : QVariant());
 	q.bindValue(5, (int)isCA());
 	q.bindValue(6, i2d_b64());
 	q.exec();
-	MainWindow::reqs->resetX509count();
+
+	resetX509ReqCount();
+
 	if (!isCA())
 		return q.lastError();
 
@@ -116,7 +125,7 @@ void pki_x509::restoreSql(const QSqlRecord &rec)
 	QByteArray ba = QByteArray::fromBase64(
 				rec.value(VIEW_x509_cert).toByteArray());
 	d2i(ba);
-	signerSqlId = rec.value(VIEW_x509_issuer);
+	issuerSqlId = rec.value(VIEW_x509_issuer);
 	crlNumber.set(rec.value(VIEW_x509_auth_crlNo).toUInt());
 	crlExpire.fromPlain(rec.value(VIEW_x509_auth_crlExpire).toString());
 	caTemplateSqlId = rec.value(VIEW_x509_auth_template);
@@ -132,47 +141,33 @@ QSqlError pki_x509::deleteSqlData()
 {
 	XSqlQuery q;
 	QSqlError e = pki_x509super::deleteSqlData();
-	if (e.isValid())
-		return e;
-	SQL_PREPARE(q, "DELETE FROM certs WHERE item=?");
-	q.bindValue(0, sqlItemId);
-	q.exec();
-	e = q.lastError();
-	if (e.isValid())
-		return e;
-	SQL_PREPARE(q, "DELETE FROM authority WHERE item=?");
-	q.bindValue(0, sqlItemId);
-	q.exec();
-	e = q.lastError();
-	if (e.isValid())
-		return e;
-	SQL_PREPARE(q, "UPDATE crls SET issuer=NULL WHERE issuer=?");
-	q.bindValue(0, sqlItemId);
-	q.exec();
-	e = q.lastError();
-	if (e.isValid())
-		return e;
-	SQL_PREPARE(q, "UPDATE certs SET issuer=NULL WHERE issuer=?");
-	q.bindValue(0, sqlItemId);
-	q.exec();
-	e = q.lastError();
-	if (e.isValid())
-		return e;
-	SQL_PREPARE(q, "DELETE FROM revocations WHERE caId=?");
-	q.bindValue(0, sqlItemId);
-	q.exec();
+	QStringList tasks; tasks
+		<< "DELETE FROM certs WHERE item=?"
+		<< "DELETE FROM authority WHERE item=?"
+		<< "UPDATE crls SET issuer=NULL WHERE issuer=?"
+		<< "UPDATE certs SET issuer=NULL WHERE issuer=?"
+		<< "DELETE FROM revocations WHERE caId=?"
+		;
+	foreach(QString task, tasks) {
+		SQL_PREPARE(q, task);
+		q.bindValue(0, sqlItemId);
+		q.exec();
+		e = q.lastError();
+		if (e.isValid())
+			return e;
+	}
 	// Select affected items
-	QList<pki_base*> list = db_base::sqlSELECTpki<pki_base>(
+	q = Store.sqlSELECTpki(
 		"SELECT DISTINCT items.id FROM items, certs, crls "
 		"WHERE (items.id = certs.item OR items.id = crls.item) "
 		"AND crls.issuer = ? AND certs.issuer = ?",
 		QList<QVariant>() << QVariant(sqlItemId)
 				  << QVariant(sqlItemId));
 
-	foreach(pki_base *pki, list)
-		AffectedItems(pki->getSqlItemId());
+	while (q.next())
+		AffectedItems(q.value(0));
 
-	MainWindow::reqs->resetX509count();
+	resetX509ReqCount();
 	return q.lastError();
 }
 
@@ -196,7 +191,7 @@ pki_x509 *pki_x509::findIssuer()
 	q.bindValue(0, hash);
 	q.exec();
 	while (q.next()) {
-		issuer = db_base::lookupPki<pki_x509>(q.value(0));
+		issuer = Store.lookupPki<pki_x509>(q.value(0));
 		if (!issuer) {
 			qDebug("Certificate with id %d not found",
                                 q.value(0).toInt());
@@ -208,40 +203,33 @@ pki_x509 *pki_x509::findIssuer()
 	return NULL;
 }
 
-void pki_x509::fromPEM_BIO(BIO *bio, QString)
+void pki_x509::fromPEM_BIO(BIO *bio, const QString &fname)
 {
 	X509 *_cert;
 	_cert = PEM_read_bio_X509(bio, NULL, NULL, NULL);
-	pki_openssl_error();
+	openssl_error(fname);
 	X509_free(cert);
 	cert = _cert;
 }
 
-void pki_x509::fload(const QString fname)
+void pki_x509::fload(const QString &fname)
 {
-	FILE *fp = fopen_read(fname);
 	X509 *_cert;
-	if (!fp) {
-		fopen_error(fname);
-		return;
-	}
-	_cert = PEM_read_X509(fp, NULL, NULL, NULL);
+	XFile file(fname);
+	file.open_read();
+	_cert = PEM_read_X509(file.fp(), NULL, NULL, NULL);
 	if (!_cert) {
 		pki_ign_openssl_error();
-		rewind(fp);
-		_cert = d2i_X509_fp(fp, NULL);
+		file.retry_read();
+		_cert = d2i_X509_fp(file.fp(), NULL);
 	}
-	fclose(fp);
-	if (pki_ign_openssl_error() ) {
+	if (pki_ign_openssl_error() || !_cert) {
 		if (_cert)
 			X509_free(_cert);
 		throw errorEx(tr("Unable to load the certificate in file %1. Tried PEM and DER certificate.").arg(fname));
 	}
 	X509_free(cert);
 	cert = _cert;
-	autoIntName();
-	if (getIntName().isEmpty())
-		setIntName(rmslashdot(fname));
 }
 
 pki_x509::~pki_x509()
@@ -254,7 +242,6 @@ pki_x509::~pki_x509()
 
 void pki_x509::init()
 {
-	psigner = NULL;
 	caTemplateSqlId = QVariant();
 	crlDays = 30;
 	crlExpire.setUndefined();
@@ -364,6 +351,7 @@ void pki_x509::store_token(bool alwaysSelect)
 
 	pkcs11 p11;
 
+	pki_key *privkey = getRefKey();
 	if (!privkey || !privkey->isToken() || alwaysSelect) {
 		if (!p11.selectToken(&slot, NULL))
 			return;
@@ -404,10 +392,11 @@ void pki_x509::store_token(bool alwaysSelect)
 
 void pki_x509::deleteFromToken()
 {
+	pki_key *privkey = getRefKey();
 	pki_scard *card = dynamic_cast<pki_scard *>(privkey);
 	slotidList p11_slots;
 
-	if (!card || !pkcs11::loaded())
+	if (!card || !pkcs11::libraries.loaded())
 		return;
 
 	if (privkey && privkey->isToken()) {
@@ -434,7 +423,7 @@ pk11_attlist pki_x509::objectAttributes()
 	return attrs;
 }
 
-void pki_x509::deleteFromToken(slotid slot)
+void pki_x509::deleteFromToken(const slotid &slot)
 {
 	pkcs11 p11;
 	p11.startSession(slot, true);
@@ -456,7 +445,7 @@ void pki_x509::deleteFromToken(slotid slot)
 	p11.deleteObjects(objs);
 }
 
-int pki_x509::renameOnToken(slotid slot, QString name)
+int pki_x509::renameOnToken(const slotid &slot, const QString &name)
 {
 
 	pkcs11 p11;
@@ -542,8 +531,8 @@ bool pki_x509::addV3ext(const x509v3ext &e, bool skip_existing)
 
 void pki_x509::delSigner(pki_base *s)
 {
-	if (s == psigner)
-		psigner = NULL;
+	if (s && (s->getSqlItemId() == issuerSqlId))
+		issuerSqlId = QVariant();
 }
 
 bool pki_x509::isCA() const
@@ -561,9 +550,10 @@ bool pki_x509::isCA() const
 
 bool pki_x509::canSign() const
 {
+	pki_key *privkey = getRefKey();
 	if (!privkey || privkey->isPubKey())
 		return false;
-	if (privkey->isToken() && !pkcs11::loaded())
+	if (privkey->isToken() && !pkcs11::libraries.loaded())
 		return false;
 	return isCA();
 }
@@ -652,29 +642,24 @@ void pki_x509::fromData(const unsigned char *p, db_header_t *head)
 }
 
 
-void pki_x509::writeDefault(const QString fname)
+void pki_x509::writeDefault(const QString &dirname) const
 {
-	writeCert(get_dump_filename(fname, ".crt"), true, false);
+	XFile file(get_dump_filename(dirname, ".crt"));
+	file.open_write();
+	writeCert(file, true);
 }
 
-void pki_x509::writeCert(const QString fname, bool PEM, bool append)
+void pki_x509::writeCert(XFile &file, bool PEM) const
 {
-	FILE *fp;
-	const char *p = "wb";
-	if (append)
-		p = "ab";
-	fp = fopen(QString2filename(fname), p);
-	if (fp != NULL) {
-		if (cert){
-			if (PEM)
-				PEM_write_X509(fp, cert);
-			else
-				i2d_X509_fp(fp, cert);
-		}
-		fclose(fp);
-		pki_openssl_error();
-	} else
-		fopen_error(fname);
+	if (!cert)
+		return;
+	if (PEM) {
+		PEM_file_comment(file);
+		PEM_write_X509(file.fp(), cert);
+	} else {
+		i2d_X509_fp(file.fp(), cert);
+	}
+	pki_openssl_error();
 }
 
 QString pki_x509::getIndexEntry()
@@ -696,13 +681,9 @@ QString pki_x509::getIndexEntry()
 		QString(X509_NAME_oneline(getSubject().get(), NULL, 0)));
 }
 
-BIO *pki_x509::pem(BIO *b, int format)
+bool pki_x509::pem(BioByteArray &b, int)
 {
-	(void)format;
-	if (!b)
-		b = BIO_new(BIO_s_mem());
-	PEM_write_bio_X509(b, cert);
-	return b;
+	return PEM_write_bio_X509(b, cert);
 }
 
 bool pki_x509::cmpIssuerAndSerial(pki_x509 *refcert)
@@ -713,10 +694,10 @@ bool pki_x509::cmpIssuerAndSerial(pki_x509 *refcert)
 
 }
 
-bool pki_x509::verify_only(pki_x509 *signer)
+bool pki_x509::verify_only(const pki_x509 *signer) const
 {
-	X509_NAME *subject = X509_get_subject_name(signer->cert);
-	X509_NAME *issuer = X509_get_issuer_name(cert);
+	const X509_NAME *subject = X509_get_subject_name(signer->cert);
+	const X509_NAME *issuer = X509_get_issuer_name(cert);
 	pki_openssl_error();
 	if (X509_NAME_cmp(subject, issuer)) {
 		return false;
@@ -727,30 +708,28 @@ bool pki_x509::verify_only(pki_x509 *signer)
 		return false;
 	}
 	int i = X509_verify(cert, pub);
+	EVP_PKEY_free(pub);
 	pki_ign_openssl_error();
 	return i>0;
 }
 
 bool pki_x509::verify(pki_x509 *signer)
 {
-	if (psigner == signer)
-		return true;
-	if ((psigner != NULL) || (signer == NULL))
+	if (getSigner() || !signer)
 		return false;
 	if (signer == this &&
-	    signerSqlId == sqlItemId &&
-	    signerSqlId != QVariant())
+	    issuerSqlId == sqlItemId &&
+	    issuerSqlId != QVariant())
 		return true;
 
-	if (verify_only(signer)) {
+	if (signer && verify_only(signer)) {
 		int idx;
 		x509rev r;
 		x509revList rl(revocation);
 		r.setSerial(getSerial());
-		psigner = signer;
-		signerSqlId = psigner->sqlItemId;
-		psigner->mergeRevList(rl);
-		rl = psigner->getRevList();
+		setSigner(signer);
+		signer->mergeRevList(rl);
+		rl = signer->getRevList();
 		idx = rl.indexOf(r);
 		if (idx != -1)
 			revocation = rl[idx];
@@ -838,13 +817,7 @@ void pki_x509::setPubKey(pki_key *key)
 
 QString pki_x509::fingerprint(const EVP_MD *digest) const
 {
-	unsigned int n;
-	unsigned char md[EVP_MAX_MD_SIZE];
-
-	pki_openssl_error();
-	X509_digest(cert, digest, md, &n);
-	pki_openssl_error();
-	return formatHash(md, n);
+	return ::fingerprint(i2d_bytearray(I2D_VOID(i2d_X509), cert), digest);
 }
 
 bool pki_x509::checkDate()
@@ -895,7 +868,7 @@ int pki_x509::sigAlg() const
 
 pki_x509 *pki_x509::getSigner()
 {
-	return psigner;
+	return Store.lookupPki<pki_x509>(issuerSqlId);
 }
 
 bool pki_x509::isRevoked() const
@@ -982,13 +955,41 @@ QStringList pki_x509::icsVEVENT() const
 			.arg(getIntName())
 			.arg(getNotBefore().toPretty())
 			.arg(getNotAfter().toPretty())
-			.arg(currentDB)
+			.arg(Database.name())
 	);
+}
+
+void pki_x509::collect_properties(QMap<QString, QString> &prp) const
+{
+	prp["Issuer"] = getIssuerName().oneLine(XN_FLAG_RFC2253);
+	prp["Serial"] = getSerial().toHex();
+	prp["CA"] = isCA() ? "Yes" : "No";
+	prp["Not Before"] = getNotBefore().toPretty();
+	prp["Not After"] = getNotAfter().toPretty();
+	prp["Self signed"] = verify_only(this) ? "Yes" : "No";
+	pki_x509super::collect_properties(prp);
+}
+
+void pki_x509::print(BioByteArray &bba, enum print_opt opt) const
+{
+	pki_x509super::print(bba, opt);
+	switch (opt) {
+	case print_openssl_txt:
+		X509_print(bba, cert);
+		break;
+	case print_pem:
+		PEM_write_bio_X509(bba, cert);
+		break;
+	case print_coloured:
+		break;
+	}
 }
 
 QStringList pki_x509::icsVEVENT_ca() const
 {
 	QStringList ics;
+	pki_crl *crl = NULL;
+
 	ics << icsVEVENT();
 	foreach(pki_base *p, childItems) {
 		pki_x509 *pki = static_cast<pki_x509 *>(p);
@@ -996,14 +997,18 @@ QStringList pki_x509::icsVEVENT_ca() const
 			ics << pki->icsVEVENT();
 	}
 
-	ics << pki_base::icsVEVENT(crlExpire,
-		tr("CRL Renewal of CA '%1' due").arg(getIntName()),
-		tr("The latest CRL issued by the CA '%1' will expire on %2.\n"
-		  "It is stored in the XCA database '%3'")
-			.arg(getIntName())
-			.arg(crlExpire.toPretty())
-			.arg(currentDB)
-	);
+	QList<pki_crl*> list = Store.sqlSELECTpki<pki_crl>(
+		"SELECT item FROM crls WHERE issuer = ?",
+		QList<QVariant>() << QVariant(sqlItemId));
+
+	/* Get latest CRL */
+	foreach(pki_crl *pki, list) {
+		if (!crl || crl->getNextUpdate() < pki->getNextUpdate())
+			crl = pki;
+	}
+	if (crl)
+		ics << crl->icsVEVENT();
+
 	return ics;
 }
 
@@ -1011,15 +1016,17 @@ QVariant pki_x509::getIcon(const dbheader *hd) const
 {
 	int pixnum = 0;
 	bool ca;
-
+	QStringList icon_names {
+		":validcertIco", ":validcertkeyIco",
+		":invalidcertIco", ":invalidcertkeyIco"
+	};
 	switch (hd->id) {
 	case HD_cert_ca:
 		if (!caAndPathLen(&ca, NULL, NULL))
 			return QVariant();
 		if (!ca)
 			return QVariant();
-		pixnum = 4;
-		break;
+		return QVariant(QPixmap(":doneIco"));
 	case HD_internal_name:
 		if (hasPrivKey())
 			pixnum += 1;
@@ -1029,7 +1036,7 @@ QVariant pki_x509::getIcon(const dbheader *hd) const
 	default:
 		return pki_x509super::getIcon(hd);
 	}
-	return QVariant(*icon[pixnum]);
+	return QVariant(QPixmap(icon_names[pixnum]));
 }
 
 bool pki_x509::visible() const

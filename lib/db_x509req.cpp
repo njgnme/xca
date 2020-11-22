@@ -8,18 +8,16 @@
 
 #include "db_x509req.h"
 #include "pki_x509req.h"
-#include "widgets/MainWindow.h"
-#include <QMessageBox>
-#include <QContextMenuEvent>
-#include <QAction>
+#include "pki_temp.h"
+#include "widgets/NewX509.h"
+#include "widgets/XcaWarning.h"
 
 
-db_x509req::db_x509req(MainWindow *mw)
-	:db_x509super(mw)
+db_x509req::db_x509req() : db_x509super("requests")
 {
-	class_name = "requests";
 	sqlHashTable = "requests";
 	pkitype << x509_req;
+	pkitype_depends << x509;
 	updateHeaders();
 	loadContainer();
 }
@@ -52,7 +50,7 @@ pki_base *db_x509req::insert(pki_base *item)
 	oldreq = (pki_x509req *)getByReference(req);
 	if (oldreq) {
 		XCA_INFO(tr("The certificate signing request already exists in the database as\n'%1'\nand thus was not stored").arg(oldreq->getIntName()));
-		delete(req);
+		delete req;
 		return NULL;
 	}
 	insertPKI(req);
@@ -67,8 +65,7 @@ void db_x509req::newItem()
 void db_x509req::newItem(pki_temp *temp, pki_x509req *orig)
 {
 	pki_x509req *req = NULL;
-	NewX509 *dlg = new NewX509(mainwin);
-	emit connNewX509(dlg);
+	NewX509 *dlg = new NewX509(NULL);
 
 	if (temp) {
 		dlg->defineTemplate(temp);
@@ -96,18 +93,9 @@ void db_x509req::newItem(pki_temp *temp, pki_x509req *orig)
 		createSuccess(insert(req));
 	}
 	catch (errorEx &err) {
-		MainWindow::Error(err);
-		if (req)
-			delete req;
+		XCA_ERROR(err);
+		delete req;
 	}
-}
-
-void db_x509req::toRequest(QModelIndex index)
-{
-	pki_x509req *req = static_cast<pki_x509req*>(index.internalPointer());
-	if (!req)
-		return;
-	newItem(NULL, req);
 }
 
 void db_x509req::load(void)
@@ -120,41 +108,37 @@ void db_x509req::store(QModelIndex index)
 {
 	QList<exportType> types;
 
-	pki_x509req *req = static_cast<pki_x509req*>(index.internalPointer());
+	pki_x509req *req = fromIndex<pki_x509req>(index);
 	if (!req)
 		return;
 
 	types << exportType(exportType::PEM, "pem", "PEM") <<
 			exportType(exportType::DER, "der", "DER");
 
-	ExportDialog *dlg = new ExportDialog(mainwin,
+	ExportDialog *dlg = new ExportDialog(NULL,
 		tr("Certificate request export"),
 		tr("Certificate request ( *.pem *.der *.csr )"), req,
-		MainWindow::csrImg, types);
+		QPixmap(":csrImg"), types);
 	if (!dlg->exec()) {
 		delete dlg;
 		return;
 	}
-	QString fname = dlg->filename->text();
 	try {
-		req->writeReq(fname, dlg->type() == exportType::PEM);
+		XFile file(dlg->filename->text());
+		pki_base::pem_comment = dlg->pemComment->isChecked();
+		file.open_write();
+		req->writeReq(file, dlg->type() == exportType::PEM);
 	}
 	catch (errorEx &err) {
-		mainwin->Error(err);
+		XCA_ERROR(err);
 	}
+	pki_base::pem_comment = false;
 	delete dlg;
-}
-
-void db_x509req::signReq(QModelIndex index)
-{
-	pki_x509req *req = static_cast<pki_x509req*>(index.internalPointer());
-	req->pkiSource = generated;
-	emit newCert(req);
 }
 
 void db_x509req::setSigned(QModelIndex index, bool signe)
 {
-	pki_x509req *req = static_cast<pki_x509req*>(index.internalPointer());
+	pki_x509req *req = fromIndex<pki_x509req>(index);
 	if (!req)
 		return;
 	req->markSigned(signe);
@@ -169,5 +153,5 @@ void db_x509req::resetX509count()
 
 QList<pki_x509req *> db_x509req::getAllRequests()
 {
-	return sqlSELECTpki<pki_x509req>("SELECT item FROM requests");
+	return Store.sqlSELECTpki<pki_x509req>("SELECT item FROM requests");
 }

@@ -12,7 +12,8 @@
 #include "ui_NewX509.h"
 #include "lib/oid.h"
 #include "lib/db.h"
-#include "widgets/kvView.h"
+#include "kvView.h"
+#include "MainWindow.h"
 #include <openssl/x509v3.h>
 #include <QListWidget>
 
@@ -43,8 +44,6 @@ class NewX509: public QDialog, public Ui::NewX509
 {
 		Q_OBJECT
 	private:
-		NIDlist eku_nid;
-		NIDlist dn_nid;
 		NIDlist aia_nid;
 		NIDlist attr_nid;
 		QList<nameEdit> attrEdits;
@@ -70,7 +69,6 @@ class NewX509: public QDialog, public Ui::NewX509
 		QList<nameEdit> setupExplicitInputs(NIDlist nid_list,
                         QWidget *parent, QWidget *old, int columns);
 
-
 	public:
 		NewX509(QWidget *parent);
 		virtual ~NewX509();
@@ -90,12 +88,10 @@ class NewX509: public QDialog, public Ui::NewX509
 		pki_x509req *getSelectedReq();
 		x509name getX509name(int _throw = 0);
 		void setX509name(const x509name &n);
-		void setImage(QPixmap *image);
-		void setAuthInfAcc_string(QString aia_txt);
-		QString getAuthInfAcc_string();
 		x509v3ext getBasicConstraints();
 		x509v3ext getSubKeyIdent();
 		x509v3ext getAuthKeyIdent();
+		x509v3ext getOCSPstaple();
 		x509v3ext getKeyUsage();
 		x509v3ext getEkeyUsage();
 		x509v3ext getSubAltName();
@@ -121,6 +117,11 @@ class NewX509: public QDialog, public Ui::NewX509
 		int do_validateExtensions();
 		void undo_validateExtensions();
 		enum pki_source getPkiSource() const;
+		QList<pki_x509req*> getAllRequests() const;
+		QList<pki_x509*> getAllIssuers() const;
+		QList<pki_temp*> getAllTempsAndPredefs() const;
+		QList<pki_key*> getUnusedKeys() const;
+		QList<pki_key*> getAllKeys() const;
 
 	public slots:
 		void on_fromReqCB_clicked();

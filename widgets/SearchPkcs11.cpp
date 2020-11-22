@@ -19,14 +19,14 @@
 #include <QStringList>
 #include <QFile>
 
-SearchPkcs11::SearchPkcs11(QWidget *parent, QString fname)
+SearchPkcs11::SearchPkcs11(QWidget *parent, const QString &fname)
 	:QDialog(parent)
 {
 	setupUi(this);
-	filename->setText(fname);
+	filename->setText(nativeSeparator(fname));
 	setWindowTitle(XCA_TITLE);
 
-	filename->setText(getLibDir());
+	liblist->setSelectionMode(QAbstractItemView::ExtendedSelection);
 	searching = NULL;
 }
 
@@ -41,10 +41,8 @@ void SearchPkcs11::on_fileBut_clicked()
 	QString s = QFileDialog::getExistingDirectory(this, QString(XCA_TITLE),
 		filename->text());
 
-	if (!s.isEmpty()) {
-		nativeSeparator(s);
-		filename->setText(s);
-	}
+	if (!s.isEmpty())
+		filename->setText(nativeSeparator(s));
 }
 
 void SearchPkcs11::on_search_clicked()
@@ -105,18 +103,24 @@ void SearchPkcs11::buttonPress(QAbstractButton *but)
 
 void SearchPkcs11::loadItem(QListWidgetItem *lib)
 {
-	emit addLib(lib->text());
+	emit addLib(lib->whatsThis());
 	delete lib;
 }
 
 void SearchPkcs11::updateCurrFile(QString f)
 {
+	f = nativeSeparator(f);
 	int len = f.length();
 	QString reduced = f;
 	QFontMetrics fm(currFile->font());
 
 	currFile->setToolTip(f);
-	while ((currFile->width() < (fm.width(reduced) -10)) && (len > 0)) {
+#if (QT_VERSION >= QT_VERSION_CHECK(5, 11, 0))
+	while ((currFile->width() < (fm.horizontalAdvance(reduced) -10)) &&
+#else
+	while ((currFile->width() < (fm.width(reduced) -10)) &&
+#endif
+					(len > 0)) {
 		len -= 10;
 		reduced = compressFilename(f, len);
 	}
@@ -126,11 +130,13 @@ void SearchPkcs11::updateCurrFile(QString f)
 
 void SearchPkcs11::updateLibs(QString f)
 {
-	liblist->addItem(new QListWidgetItem(f));
+	QListWidgetItem *i = new QListWidgetItem(nativeSeparator(f));
+	i->setWhatsThis(f);
+	liblist->addItem(i);
 	liblist->update();
 }
 
-searchThread::searchThread(QString _dir, QStringList _ext, bool _recursive)
+searchThread::searchThread(QString _dir, const QStringList _ext, bool _recursive)
 {
 	dirname = _dir;
 	ext = _ext;
@@ -171,7 +177,7 @@ void searchThread::search(QString mydir)
 		QString file = files.takeFirst();
 		if (file.isEmpty())
 			continue;
-		file = mydir + QDir::separator() + file;
+		file = mydir + "/" + file;
 		emit updateCurrFile(file);
 		if (checkLib(file))
 			emit updateLibs(file);
@@ -184,7 +190,7 @@ void searchThread::search(QString mydir)
 		foreach(d, dirs) {
 			if (!keepOnRunning)
 				break;
-			QString s = mydir +QDir::separator() +d;
+			QString s = mydir + "/" + d;
 			emit updateCurrFile(s);
 			search(s);
 		}

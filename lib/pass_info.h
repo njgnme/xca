@@ -10,41 +10,51 @@
 
 #include <QString>
 #include <QObject>
-#include <QWidget>
+#include <QApplication>
 
-#include "widgets/MainWindow.h"
+#include "lib/exception.h"
+
+class QWidget;
 
 class pass_info: public QObject
 {
-		Q_OBJECT
+	Q_OBJECT
+
    private:
 	QString title;
 	QString description;
 	QWidget *widget;
 	QString type;
-	QPixmap *pixmap;
+	QString pixmap;
+	enum open_result result;
 
    public:
-	pass_info(QString t, QString d, QWidget *w = NULL);
-	QString getTitle()
+	pass_info(const QString &t, const QString &d, QWidget *w = NULL);
+	QString getTitle() const
 	{
 		return title;
 	}
-	QString getDescription()
+	QString getDescription() const
 	{
 		return description;
 	}
 	QWidget *getWidget()
 	{
+		if (!widget)
+			widget = qApp->activeWindow();
 		return widget;
 	}
-	QString getType()
+	QString getType() const
 	{
 		return type;
 	}
-	QPixmap getImage()
+	QString getImage() const
 	{
-		return QPixmap(*pixmap);
+		return pixmap;
+	}
+	enum open_result getResult() const
+	{
+		return result;
 	}
 	void setTitle(QString t)
 	{
@@ -57,6 +67,10 @@ class pass_info: public QObject
 	void setWidget(QWidget *w)
 	{
 		widget = w;
+	}
+	void setResult(enum open_result r)
+	{
+		result = r;
 	}
 	void setPin();
 };

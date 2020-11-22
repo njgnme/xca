@@ -6,13 +6,17 @@
  */
 
 
-#include "KeyDetail.h"
-#include "MainWindow.h"
 #include "lib/main.h"
 #include "lib/pki_evp.h"
 #include "lib/pki_scard.h"
-#include "widgets/distname.h"
-#include "widgets/clicklabel.h"
+
+#include "KeyDetail.h"
+#include "MainWindow.h"
+#include "distname.h"
+#include "clicklabel.h"
+#include "XcaApplication.h"
+#include "OidResolver.h"
+
 #include <QLabel>
 #include <QPushButton>
 #include <QLineEdit>
@@ -22,21 +26,51 @@ KeyDetail::KeyDetail(QWidget *parent)
 {
 	setupUi(this);
 	setWindowTitle(XCA_TITLE);
-	image->setPixmap(*MainWindow::keyImg);
-	keyModulus->setFont(XCA_application::tableFont);
+	image->setPixmap(QPixmap(":keyImg"));
+	keyModulus->setFont(XcaApplication::tableFont);
 	tabWidget->setCurrentIndex(0);
 }
 
 #ifndef OPENSSL_NO_EC
 static QString CurveComment(int nid)
 {
-	foreach(builtin_curve curve, pki_key::builtinCurves) {
+	foreach(builtin_curve curve, builtinCurves) {
 		if (curve.nid == nid)
 			return curve.comment;
 	}
 	return QString();
 }
 #endif
+
+void KeyDetail::setupFingerprints(pki_key *key)
+{
+	int pos = 0;
+	QWidget *widget = new QWidget(fingerprint);
+	QVBoxLayout *v = new QVBoxLayout(fingerprint);
+	QGridLayout *grid = new QGridLayout(widget);
+	v->addStretch();
+	v->addWidget(widget);
+	v->addStretch();
+
+	QStringList sl; sl <<
+		"ssh MD5" << "ssh SHA256 B64" <<
+		"x509 SHA1" << "DER SHA256";
+
+	foreach(QString type, sl) {
+		qDebug() << type << key->fingerprint(type);
+
+		QLabel *left = new QLabel(widget);
+		CopyLabel *right = new CopyLabel(widget);
+
+		left->setTextFormat(Qt::PlainText);
+		left->setText(type);
+		right->setText(key->fingerprint(type));
+
+		grid->addWidget(left, pos, 0);
+		grid->addWidget(right, pos, 1);
+		pos++;
+	}
+}
 
 void KeyDetail::setKey(pki_key *key)
 {
@@ -49,11 +83,13 @@ void KeyDetail::setKey(pki_key *key)
 	tlHeader->setText(tr("Details of the %1 key").arg(key->getTypeString()));
 	comment->setPlainText(key->getComment());
 
+	setupFingerprints(key);
+
 	if (key->isPubKey()) {
 		keyPrivEx->setText(tr("Not available"));
 		keyPrivEx->setRed();
 	} else if (key->isToken()) {
-		image->setPixmap(*MainWindow::scardImg);
+		image->setPixmap(QPixmap(":scardImg"));
 		pki_scard *card = static_cast<pki_scard *>(key);
 		cardLabel->setText(card->getCardLabel());
 		cardModel->setText(card->getModel());

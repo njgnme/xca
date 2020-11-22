@@ -15,21 +15,14 @@
 #include "x509name.h"
 #include "func.h"
 #include "db.h"
-#include "widgets/MainWindow.h"
+#include "widgets/XcaWarning.h"
+#include "widgets/XcaProgress.h"
 
-#include <openssl/rand.h>
-#include <openssl/bn.h>
-
-#include <QProgressDialog>
-#include <QApplication>
-#include <QDir>
-#include <QMessageBox>
 #include <QThread>
+#include <QProgressBar>
 #include <ltdl.h>
 
 #include "openssl_compat.h"
-
-QPixmap *pki_scard::icon[1] = { NULL };
 
 void pki_scard::init(void)
 {
@@ -356,7 +349,7 @@ pk11_attlist pki_scard::objectAttributes(bool priv) const
 	return attrs;
 }
 
-void pki_scard::deleteFromToken(slotid slot)
+void pki_scard::deleteFromToken(const slotid &slot)
 {
 	pkcs11 p11;
 	p11.startSession(slot, true);
@@ -378,7 +371,7 @@ void pki_scard::deleteFromToken(slotid slot)
 	p11.deleteObjects(pub_objects);
 }
 
-int pki_scard::renameOnToken(slotid slot, QString name)
+int pki_scard::renameOnToken(const slotid &slot, const QString &name)
 {
 	pkcs11 p11;
 	p11.startSession(slot, true);
@@ -405,7 +398,7 @@ int pki_scard::renameOnToken(slotid slot, QString name)
 	return 1;
 }
 
-void pki_scard::store_token(slotid slot, EVP_PKEY *pkey)
+void pki_scard::store_token(const slotid &slot, EVP_PKEY *pkey)
 {
 	QByteArray ba;
 	RSA *rsa;
@@ -588,59 +581,51 @@ QList<int> pki_scard::possibleHashNids()
 	return nids;
 }
 
-/* Assures the correct card is inserted and
- * returns the slot ID in slot true on success */
-bool pki_scard::prepare_card(slotid *slot, bool verifyPubkey) const
+bool pki_scard::find_key_on_card(slotid *slot) const
 {
 	pkcs11 p11;
-	slotidList p11_slots;
-	int i;
+	slotid sl;
 
-	if (!pkcs11::loaded())
-		return false;
-	while (1) {
-		p11_slots = p11.getSlotList();
-		for (i=0; i<p11_slots.count(); i++) {
-			pkcs11 myp11;
-			tkInfo ti = myp11.tokenInfo(p11_slots[i]);
-			if (ti.label() == card_label &&
-			    ti.serial() == card_serial)
-			{
-				break;
-			}
-		}
-		if (i < p11_slots.count())
-			break;
-		QString msg = tr("Please insert card: %1 %2 [%3] with Serial: %4").
-			arg(card_manufacturer).arg(card_model).
-			arg(card_label).arg(card_serial);
-
-		if (!XCA_OKCANCEL(msg)) {
-			return false;
-		}
-	}
-
-	*slot = p11_slots[i];
-	if (!verifyPubkey)
-		return true;
-
-	QList<CK_OBJECT_HANDLE> objects;
-
-	p11.startSession(p11_slots[i]);
-
-	pk11_attlist cls (pk11_attr_ulong(CKA_CLASS, CKO_PUBLIC_KEY));
+	pk11_attlist cls(pk11_attr_ulong(CKA_CLASS, CKO_PUBLIC_KEY));
 	cls << getIdAttr();
 
-	objects = p11.objectList(cls);
+	foreach(sl, p11.getSlotList()) {
+		p11.startSession(sl);
 
-	for (int j=0; j< objects.count(); j++) {
-		CK_OBJECT_HANDLE object = objects[j];
-		EVP_PKEY *pkey = load_pubkey(p11, object);
-		if (EVP_PKEY_cmp(key, pkey) == 1)
-			return true;
-		if (!object_id.isEmpty())
-			XCA_WARN(tr("Public Key mismatch. Please re-import card"));
+		foreach(CK_OBJECT_HANDLE object, p11.objectList(cls)) {
+			EVP_PKEY *pkey = load_pubkey(p11, object);
+			bool match = EVP_PKEY_cmp(key, pkey) == 1;
+			EVP_PKEY_free(pkey);
+
+			if (match) {
+				*slot = sl;
+				return true;
+			}
+		}
 	}
+	return false;
+}
+
+/* Assures the correct card is inserted and
+ * returns the slot ID in slot true on success */
+bool pki_scard::prepare_card(slotid *slot) const
+{
+	if (!pkcs11::libraries.loaded())
+		return false;
+
+	QString msg = tr("Please insert card: %1 %2 [%3] with Serial: %4").
+			arg(card_manufacturer).arg(card_model).
+			arg(card_label).arg(card_serial);
+	do {
+		try {
+			if (find_key_on_card(slot))
+				return true;
+		} catch (errorEx &err) {
+			qDebug() << "find_key_on_card:" << err.getString();
+		} catch (...) {
+			qDebug() << "find_key_on_card exception";
+		}
+	} while (XCA_OKCANCEL(msg));
 	return false;
 }
 
@@ -649,59 +634,41 @@ class keygenThread: public QThread
 public:
 	errorEx err;
 	pk11_attr_data id;
+	const keyjob task;
 	QString name;
-	int size;
-	int curve_nid;
-	int method;
 	pkcs11 *p11;
+
+	keygenThread(const keyjob &t, const QString &n, pkcs11 *_p11)
+		: QThread(), task(t), name(n), p11(_p11) { }
 
 	void run()
 	{
 		try {
-			id = p11->generateKey(name, method, size, curve_nid);
+			id = p11->generateKey(name, task.ktype.mech, task.size,
+						task.ec_nid);
 		} catch (errorEx &e) {
 			err = e;
 		}
 	}
 };
 
-void pki_scard::generateKey_card(int type, slotid slot, int size,
-		int curve_nid, QProgressBar *bar)
+void pki_scard::generate(const keyjob &task)
 {
 	pk11_attlist atts;
 
 	pkcs11 p11;
-	p11.startSession(slot, true);
+	p11.startSession(task.slot, true);
 	p11.getRandom();
-
 	tkInfo ti = p11.tokenInfo();
 
 	if (p11.tokenLogin(ti.label(), false).isNull())
 		return;
 
-	keygenThread kt;
-	kt.name = getIntName();
-	kt.size = size;
-	kt.curve_nid = curve_nid;
-	switch (type) {
-	case EVP_PKEY_RSA:
-		kt.method = CKM_RSA_PKCS_KEY_PAIR_GEN;
-		break;
-	case EVP_PKEY_DSA:
-		kt.method = CKM_DSA_KEY_PAIR_GEN;
-		break;
-#ifndef OPENSSL_NO_EC
-	case EVP_PKEY_EC:
-		kt.method = CKM_EC_KEY_PAIR_GEN;
-		break;
-#endif
-	default:
-		throw errorEx(tr("Illegal Key generation method"));
-	}
-	kt.p11 = &p11;
+	XcaProgress progress;
+	keygenThread kt(task, getIntName(), &p11);
 	kt.start();
 	while (!kt.wait(20)) {
-		inc_progress_bar(0, 0, bar);
+		progress.increment();
 	}
 	if (!kt.err.isEmpty())
 		throw errorEx(kt.err);
@@ -838,7 +805,8 @@ bool pki_scard::isToken()
 
 QVariant pki_scard::getIcon(const dbheader *hd) const
 {
-	return hd->id == HD_internal_name ? QVariant(*icon[0]) : QVariant();
+	return hd->id == HD_internal_name ?
+		QVariant(QPixmap(":scardIco")) : QVariant();
 }
 
 bool pki_scard::visible() const

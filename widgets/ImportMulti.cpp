@@ -7,6 +7,7 @@
 
 
 #include "ImportMulti.h"
+#include "XcaWarning.h"
 #include "MainWindow.h"
 #include "lib/pki_base.h"
 #include "lib/pki_pkcs7.h"
@@ -15,9 +16,11 @@
 #include "lib/pki_multi.h"
 #include "lib/pki_scard.h"
 #include "lib/pki_evp.h"
-#include "widgets/CrlDetail.h"
-#include "widgets/CertDetail.h"
-#include "widgets/KeyDetail.h"
+#include "lib/pki_temp.h"
+#include "CrlDetail.h"
+#include "CertDetail.h"
+#include "KeyDetail.h"
+
 #include <QPushButton>
 #include <QMessageBox>
 #include <QLabel>
@@ -26,17 +29,16 @@
 #include <QMimeData>
 #include <typeinfo>
 
-ImportMulti::ImportMulti(MainWindow *parent)
+ImportMulti::ImportMulti(QWidget *parent)
 	:QDialog(parent)
 {
-	mainwin = parent;
 	setupUi(this);
 	setWindowTitle(XCA_TITLE);
-	image->setPixmap(*MainWindow::certImg);
+	image->setPixmap(QPixmap(":certImg"));
 	listView->setEditTriggers(QAbstractItemView::NoEditTriggers);
-	mcont = new db_token(parent);
+	mcont = new db_token();
 	listView->setModel(mcont);
-	listView->setIconSize(pki_evp::icon[0]->size());
+	listView->setIconSize(QPixmap(":key").size());
 	listView->setSelectionMode(QAbstractItemView::ExtendedSelection);
 	connect( listView, SIGNAL(doubleClicked(const QModelIndex &)),
 		this, SLOT(on_butDetails_clicked()));
@@ -46,7 +48,7 @@ ImportMulti::ImportMulti(MainWindow *parent)
 	setAcceptDrops(true);
 }
 
-void ImportMulti::tokenInfo(slotid s)
+void ImportMulti::tokenInfo(const slotid &s)
 {
 	slot = s;
 	mcont->setSlot(slot);
@@ -63,7 +65,7 @@ void ImportMulti::tokenInfo(slotid s)
 		arg(ti.label()).arg(ti.model()).arg(ti.serial());
 
 	slotInfo->setText(info);
-	image->setPixmap(*MainWindow::scardImg);
+	image->setPixmap(QPixmap(":scardImg"));
 	heading->setText(tr("Manage security token"));
 	setAcceptDrops(false);
 }
@@ -75,64 +77,47 @@ void ImportMulti::addItem(pki_base *pki)
 
 	if (pki->pkiSource == unknown)
 		pki->pkiSource = imported;
-
-	const std::type_info &t = typeid(*pki);
-	if (t == typeid(pki_x509)) {
-		pki_x509 *x = static_cast<pki_x509 *>(pki);
-		x->setSigner(x->findIssuer());
-		x->lookupKey();
-		mcont->inToCont(pki);
-	}
-	else if (t == typeid(pki_x509req)) {
-		pki_x509req *x = static_cast<pki_x509req *>(pki);
-		x->lookupKey();
-		mcont->inToCont(pki);
-	}
-	else if (t == typeid(pki_crl)) {
-		pki_crl *x = static_cast<pki_crl *>(pki);
-		x->lookupIssuer();
-		mcont->inToCont(pki);
-	}
-	else if (t == typeid(pki_evp) || t == typeid(pki_temp) ||
-		 t == typeid(pki_scard))
-	{
-		mcont->inToCont(pki);
-	}
-	else if (t == typeid(pki_pkcs7)) {
-		pki_pkcs7 *p7 = static_cast<pki_pkcs7 *>(pki);
-		for (int i=0; i<p7->numCert(); i++) {
-			addItem(p7->getCert(i));
-		}
-		delete p7;
-	}
-	else if (t == typeid(pki_pkcs12)) {
-		pki_pkcs12 *p12 = static_cast<pki_pkcs12 *>(pki);
-		addItem(p12->getKey());
-		addItem(p12->getCert());
-		for (int i=0; i<p12->numCa(); i++) {
-			addItem(p12->getCa(i));
-		}
-		delete p12;
-	}
-	else if (t == typeid(pki_multi)) {
-		pki_multi *pm = static_cast<pki_multi*>(pki);
-		pki_base *inner;
-		while ((inner = pm->pull()))
+	pki_multi *pm = dynamic_cast<pki_multi*>(pki);
+	if (pm) {
+		QList<pki_base*> items = pm->pull();
+		foreach(pki_base *inner, items)
 			addItem(inner);
 		delete pm;
+		return;
 	}
-	else  {
+
+	pki_x509 *cert = dynamic_cast<pki_x509 *>(pki);
+	pki_crl *crl = dynamic_cast<pki_crl *>(pki);
+	pki_x509super *cert_or_req = dynamic_cast<pki_x509super *>(pki);
+
+	if (cert)
+		cert->setSigner(cert->findIssuer());
+	if (cert_or_req)
+		cert_or_req->lookupKey();
+	if (crl)
+		crl->lookupIssuer();
+
+	if (!dynamic_cast<pki_key*>(pki) &&
+	    !dynamic_cast<pki_x509name*>(pki))
+	{
 		XCA_WARN(tr("The type of the item '%1' is not recognized").
-			arg(t.name()));
+			arg(pki->getClassName()));
+		delete pki;
+		return;
 	}
-	if (t == typeid(pki_scard))
-		mcont->rename_token_in_database(dynamic_cast<pki_scard*>(pki));
+	mcont->inToCont(pki);
+	mcont->rename_token_in_database(dynamic_cast<pki_scard*>(pki));
 }
 
-void ImportMulti::openDB()
+bool ImportMulti::openDB() const
 {
-	if (!mainwin->keys)
-		mainwin->load_database();
+	if (!Database.isOpen()) {
+		if (mainwin->init_database(QString()) == 2)
+			return false;
+		if (!Database.isOpen())
+			mainwin->load_database();
+	}
+	return Database.isOpen();
 }
 
 void ImportMulti::dragEnterEvent(QDragEnterEvent *event)
@@ -148,13 +133,10 @@ void ImportMulti::dropEvent(QDropEvent *event)
 	QStringList failed;
 	pki_multi *pki = new pki_multi();
 
-	foreach(u, urls) {
-		QString s = u.toLocalFile();
-		int count = pki->count();
-		pki->probeAnything(s);
-		if (pki->count() == count)
-			failed << s;
-	}
+	foreach(u, urls)
+		pki->probeAnything(u.toLocalFile());
+
+	failed << pki->failed_files;
 	importError(failed);
 	addItem(pki);
 	event->acceptProposedAction();
@@ -171,22 +153,23 @@ void ImportMulti::on_butRemove_clicked()
 		if (index.column() != 0)
 			continue;
 		mcont->remFromCont(index);
-		pki_base *pki = static_cast<pki_base*>(index.internalPointer());
+		pki_base *pki = db_base::fromIndex(index);
 		delete pki;
 	}
 }
 
 void ImportMulti::on_butOk_clicked()
 {
-	openDB();
+	if (!openDB())
+		return;
 
 	Transaction;
 	if (!TransBegin())
 		return;
-	while (mcont->rootItem->childCount()) {
-		QModelIndex idx = mcont->index(0, 0, QModelIndex());
-		import(idx);
-	}
+
+	while (mcont->rowCount(QModelIndex()))
+		import(mcont->index(0, 0, QModelIndex()));
+
 	TransCommit();
 	accept();
 }
@@ -196,7 +179,8 @@ void ImportMulti::on_butImport_clicked()
 	QItemSelectionModel *selectionModel = listView->selectionModel();
 	QModelIndexList indexes = selectionModel->selectedIndexes();
 
-	openDB();
+	if (!openDB())
+		return;
 
 	Transaction;
 	if (!TransBegin())
@@ -219,13 +203,13 @@ void ImportMulti::on_deleteToken_clicked()
 	foreach(index, indexes) {
 		if (index.column() != 0)
 			continue;
-		pki_base *pki = static_cast<pki_base*>(index.internalPointer());
+		pki_base *pki = db_base::fromIndex(index);
 		try {
 			pki->deleteFromToken(slot);
 			mcont->remFromCont(index);
 			delete pki;
 		} catch (errorEx &err) {
-			mainwin->Error(err);
+			XCA_ERROR(err);
 		}
 	}
 }
@@ -244,104 +228,87 @@ void ImportMulti::on_renameToken_clicked()
 	}
 }
 
-static db_base *select_db(const std::type_info &t)
+pki_base *ImportMulti::import(const QModelIndex &idx)
 {
-	if (t == typeid(pki_x509))    return MainWindow::certs;
-	if (t == typeid(pki_evp))     return MainWindow::keys;
-	if (t == typeid(pki_scard))   return MainWindow::keys;
-	if (t == typeid(pki_x509req)) return MainWindow::reqs;
-	if (t == typeid(pki_crl))     return MainWindow::crls;
-	if (t == typeid(pki_temp))    return MainWindow::temps;
-	return NULL;
-}
+	pki_base *pki = mcont->fromIndex(idx);
 
-pki_base *ImportMulti::import(QModelIndex &idx)
-{
+	for (int i = 0; i < mcont->rowCount(idx); i++)
+		import(mcont->index(i, 0, idx));
 
-	pki_base *pki = static_cast<pki_base*>(idx.internalPointer());
-	db_base *db;
-
-	if (!pki || !mainwin->keys)
+	if (!pki)
 		return NULL;
-
-	const std::type_info &t = typeid(*pki);
 
 	mcont->remFromCont(idx);
-	if (!mainwin->keys) {
+
+	if (!Database.isOpen()) {
 		delete pki;
 		return NULL;
 	}
-
-	if (t == typeid(pki_evp))
-		static_cast<pki_evp*>(pki)->setOwnPass(pki_evp::ptCommon);
-
-	db = select_db(t);
-	if (!db) {
-		XCA_WARN(tr("The type of the item '%1' is not recognized").
-			arg(t.name()));
-		delete pki;
-		return NULL;
-	}
-	return db->insert(pki);
+	return Database.insert(pki);
 }
 
 void ImportMulti::on_butDetails_clicked()
 {
 	QItemSelectionModel *selectionModel = listView->selectionModel();
 	QModelIndex index;
+	db_key *keys = Database.model<db_key>();
+	db_x509 *certs = Database.model<db_x509>();
 
 	if (!selectionModel->selectedIndexes().count())
 	        return;
 
 	index = selectionModel->selectedIndexes().first();
-	pki_base *pki = static_cast<pki_base*>(index.internalPointer());
+	pki_base *pki = db_base::fromIndex(index);
 
 	if (!pki)
 		return;
-	const std::type_info &t = typeid(*pki);
 	try {
-		if (t == typeid(pki_x509)){
-			CertDetail *dlg = new CertDetail(mainwin);
-			dlg->setCert(static_cast<pki_x509 *>(pki));
+		pki_x509super *pki_super = dynamic_cast<pki_x509super*>(pki);
+		if (pki_super) {
+			CertDetail *dlg = new CertDetail(NULL);
+			dlg->setX509super(pki_super);
 			connect(dlg->privKey, SIGNAL(doubleClicked(QString)),
-				mainwin->keys, SLOT(showItem(QString)));
+				keys, SLOT(showItem(QString)));
 			connect(dlg->signature,
 				SIGNAL(doubleClicked(QString)),
-				mainwin->certs, SLOT(showItem(QString)));
+				certs, SLOT(showItem(QString)));
 			if (dlg->exec())
 				pki->setIntName(dlg->descr->text());
 			delete dlg;
-		} else if (t == typeid(pki_evp) || t == typeid(pki_scard)) {
-			KeyDetail *dlg = new KeyDetail(mainwin);
-			dlg->setKey(static_cast<pki_key *>(pki));
+			return;
+		}
+		pki_key *key = dynamic_cast<pki_key*>(pki);
+		if (key) {
+			KeyDetail *dlg = new KeyDetail(NULL);
+			dlg->setKey(key);
 			if (dlg->exec())
 				pki->setIntName(dlg->keyDesc->text());
 			delete dlg;
-		} else if (t == typeid(pki_x509req)) {
-			CertDetail *dlg = new CertDetail(mainwin);
-			dlg->setReq(static_cast<pki_x509req *>(pki));
-			connect(dlg->privKey, SIGNAL(doubleClicked(QString)),
-				mainwin->keys, SLOT(showItem(QString)));
-			if (dlg->exec())
-				pki->setIntName(dlg->descr->text());
-			delete dlg;
-		} else if (t == typeid(pki_crl)) {
-			CrlDetail *dlg = new CrlDetail(mainwin);
-			dlg->setCrl(static_cast<pki_crl *>(pki));
+			return;
+		}
+		pki_crl *crl = dynamic_cast<pki_crl*>(pki);
+		if (crl) {
+			CrlDetail *dlg = new CrlDetail(NULL);
+			dlg->setCrl(crl);
 			connect(dlg->issuerIntName,
 				SIGNAL(doubleClicked(QString)),
-				mainwin->certs, SLOT(showItem(QString)));
+				certs, SLOT(showItem(QString)));
 			if (dlg->exec())
 				pki->setIntName(dlg->descr->text());
 			delete dlg;
-		} else if (t == typeid(pki_temp)) {
+			return;
+		}
+		pki_temp *temp = dynamic_cast<pki_temp*>(pki);
+		if (temp) {
 			XCA_WARN(tr("Details of the item '%1' cannot be shown")
 				.arg("XCA template"));
-		} else
-			XCA_WARN(tr("The type of the item '%1' is not recognized").arg(t.name()));
+			return;
+		}
+		XCA_WARN(tr("The type of the item '%1' is not recognized").
+			arg(pki->getClassName()));
 	}
 	catch (errorEx &err) {
-		mainwin->Error(err);
+		XCA_ERROR(err);
 	}
 }
 
@@ -350,8 +317,7 @@ ImportMulti::~ImportMulti()
 	QModelIndex idx = listView->currentIndex();
 	while (idx != QModelIndex()) {
 		mcont->remFromCont(idx);
-		pki_base *pki = static_cast<pki_base*>(idx.internalPointer());
-		delete pki;
+		delete db_base::fromIndex(idx);
 		idx = listView->currentIndex();
 	}
 	listView->setModel(NULL);
@@ -360,7 +326,7 @@ ImportMulti::~ImportMulti()
 
 int ImportMulti::entries()
 {
-	return mcont->rootItem->childCount();
+	return mcont->allItemsCount();
 }
 
 void ImportMulti::importError(QStringList failed)
@@ -385,8 +351,7 @@ void ImportMulti::execute(int force, QStringList failed)
 		return;
 	}
 	/* if there is only 1 item and force is 0 import it silently */
-	if (entries() == 1 && force == 0) {
-		openDB();
+	if (entries() == 1 && force == 0 && openDB()) {
 		QModelIndex idx = mcont->index(0, 0, QModelIndex());
 		pki_base *pki = import(idx);
 		if (pki && !Settings["suppress_messages"])

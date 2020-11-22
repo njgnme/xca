@@ -23,21 +23,20 @@ class ImportMulti: public QDialog, private Ui::ImportMulti
 	private:
 		slotid slot;
 		db_token *mcont;
-		MainWindow *mainwin;
 		void importError(QStringList failed);
 
 	public:
-		ImportMulti(MainWindow *parent);
+		ImportMulti(QWidget *parent);
 		~ImportMulti();
 		void addItem(pki_base *pki);
 		pki_base *getSelected();
-		pki_base *import(QModelIndex &idx);
+		pki_base *import(const QModelIndex &idx);
 		void execute(int force=0, QStringList failed = QStringList());
 		int entries();
-		void tokenInfo(slotid s);
+		void tokenInfo(const slotid &s);
 		void dragEnterEvent(QDragEnterEvent *event);
 		void dropEvent(QDropEvent *event);
-		void openDB();
+		bool openDB() const;
 
 	public slots:
 		void on_butRemove_clicked();

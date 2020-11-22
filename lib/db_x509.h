@@ -9,31 +9,29 @@
 #ifndef __DB_X509_H
 #define __DB_X509_H
 
-#include <QListView>
-#include <QPixmap>
-#include <QTreeWidget>
-#include "widgets/ExportDialog.h"
-#include "db_key.h"
 #include "db_x509super.h"
-#include "pki_x509.h"
-#include "pki_crl.h"
-#include "pki_temp.h"
+#include "asn1int.h"
+#include "x509rev.h"
+
+class pki_x509req;
+class pki_x509;
+class pki_temp;
+class pki_crl;
 
 class db_x509: public db_x509super
 {
 	Q_OBJECT
 
 	protected:
-		QPixmap *certicon[4];
 		pki_x509 *get1SelectedCert();
 		dbheaderList getHeaders();
 		void dereferenceIssuer();
 
 	public:
-		static bool treeview;
-		db_x509(MainWindow *mw);
+		db_x509();
 		pki_base *newPKI(enum pki_type type = none);
 		pki_x509 *findIssuer(pki_x509 *client);
+		virtual void loadContainer();
 
 		bool updateView();
 		void updateViewAll();
@@ -41,19 +39,17 @@ class db_x509: public db_x509super
 		void remFromCont(const QModelIndex &idx);
 		QList<pki_x509*> getAllIssuers();
 		QList<pki_x509*> getCerts(bool unrevoked);
-		void writeIndex(const QString &fname, bool hierarchy);
-		void writeIndex(const QString &fname, QList<pki_x509*> items);
-		void writeAllCerts(const QString &fname, bool unrevoked);
+		void writeIndex(const QString &fname, bool hierarchy) const;
+		void writeIndex(XFile &file, QList<pki_x509*> items) const;
 		pki_base *insert(pki_base *item);
 		void markRequestSigned(pki_x509req *req, pki_x509 *cert);
 		pki_x509 *newCert(NewX509 *dlg);
 		void newCert(pki_x509 *cert);
-		void writePKCS12(pki_x509 *cert, QString s, bool chain);
-		void writePKCS7(pki_x509 *cert, QString s,
-				exportType::etype type, QModelIndexList list);
+		void writePKCS12(pki_x509 *cert, XFile &file, bool chain) const;
+		void writePKCS7(pki_x509 *cert, XFile &file,
+			exportType::etype type, QModelIndexList list) const;
 		void fillContextMenu(QMenu *menu, const QModelIndex &index);
 		void inToCont(pki_base *pki);
-		void changeView();
 		a1int getUniqueSerial(pki_x509 *signer);
 		void toToken(QModelIndex idx, bool alwaysSelect);
 		void toRequest(QModelIndex idx);

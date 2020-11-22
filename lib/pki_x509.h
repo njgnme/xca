@@ -1,6 +1,6 @@
 /* vi: set sw=4 ts=4:
  *
- * Copyright (C) 2001 - 2012 Christian Hohnstaedt.
+ * Copyright (C) 2001 - 2020 Christian Hohnstaedt.
  *
  * All rights reserved.
  */
@@ -8,16 +8,11 @@
 #ifndef __PKI_X509_H
 #define __PKI_X509_H
 
-#include <stdio.h>
 #include <openssl/x509.h>
 #include <openssl/x509v3.h>
 #include <openssl/pem.h>
-#include "pki_temp.h"
-#include "pki_key.h"
-#include "pki_x509req.h"
+#include "database_model.h"
 #include "pki_x509super.h"
-#include "asn1time.h"
-#include "asn1int.h"
 #include "x509rev.h"
 #include "x509v3ext.h"
 #include "pkcs11.h"
@@ -33,12 +28,13 @@
 #define VIEW_x509_auth_dnPolicy_UNUSED 15
 #define VIEW_x509_revocation 16
 
+class pki_key;
+
 class pki_x509 : public pki_x509super
 {
 		Q_OBJECT
 	private:
-		pki_x509 *psigner;
-		QVariant signerSqlId;
+		QVariant issuerSqlId;
 		a1time crlExpire;
 		a1int crlNumber;
 		int crlDays;
@@ -47,26 +43,27 @@ class pki_x509 : public pki_x509super
 		void init();
 		x509rev revocation;
 		x509revList fromDataRevList;
+		void resetX509ReqCount() const;
 
 	protected:
 		int sigAlg() const;
+		void collect_properties(QMap<QString, QString> &prp) const;
 
 	public:
-		static QPixmap *icon[5];
 		pki_x509(X509 *c);
 		pki_x509(const pki_x509 *crt);
-		pki_x509(const QString name = "");
+		pki_x509(const QString &name = QString());
 		~pki_x509();
 
-		void setSigner(pki_x509 *signer)
+		void setSigner(pki_x509 *s)
 		{
-			psigner = signer;
+			issuerSqlId = s ? s->getSqlItemId() : QVariant();
 		}
-		void fload(const QString fname);
+		void fload(const QString &fname);
 		void load_token(pkcs11 &p11, CK_OBJECT_HANDLE object);
 		void store_token(bool alwaysSelect);
-		void fromPEM_BIO(BIO *bio, QString name);
-		void writeDefault(const QString fname);
+		void fromPEM_BIO(BIO *bio, const QString &name);
+		void writeDefault(const QString &dirname) const;
 		a1int hashInfo(const EVP_MD *md) const;
 		void setSerial(const a1int &serial);
 		a1int getSerial() const;
@@ -83,10 +80,10 @@ class pki_x509 : public pki_x509super
 		void fromData(const unsigned char *p, db_header_t *head);
 		bool isCA() const;
 		bool canSign() const;
-		void writeCert(const QString fname, bool PEM, bool append = false);
+		void writeCert(XFile &file, bool PEM) const;
 		QString getIndexEntry();
 		bool verify(pki_x509 *signer);
-		bool verify_only(pki_x509 *signer);
+		bool verify_only(const pki_x509 *signer) const;
 		pki_key *getPubKey() const;
 		void setPubKey(pki_key *key);
 		pki_x509 *getSigner();
@@ -141,6 +138,7 @@ class pki_x509 : public pki_x509super
 		bool cmpIssuerAndSerial(pki_x509 *refcert);
 		bool visible() const;
 		void updateView();
+		void print(BioByteArray &b, enum print_opt opt) const;
 		x509v3ext getExtByNid(int nid) const;
 		QVariant column_data(const dbheader *hd) const;
 		QVariant getIcon(const dbheader *hd) const;
@@ -148,10 +146,10 @@ class pki_x509 : public pki_x509super
 		QByteArray i2d() const;
 		void d2i(QByteArray &ba);
 		void deleteFromToken();
-		void deleteFromToken(slotid slot);
+		void deleteFromToken(const slotid &slot);
 		QString getMsg(msg_type msg) const;
-		int renameOnToken(slotid slot, QString name);
-		BIO *pem(BIO *, int);
+		int renameOnToken(const slotid &slot, const QString &name);
+		bool pem(BioByteArray &, int);
 		QVariant bg_color(const dbheader *hd) const;
 		void mergeRevList(x509revList &l);
 		void setRevocations(const x509revList &rl);

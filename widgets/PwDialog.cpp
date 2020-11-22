@@ -5,11 +5,12 @@
  * All rights reserved.
  */
 
-
-#include "PwDialog.h"
+#include "lib/func.h"
 #include "lib/base.h"
 #include "lib/Passwd.h"
-#include "widgets/MainWindow.h"
+#include "lib/exception.h"
+#include "XcaWarning.h"
+#include "PwDialog.h"
 #include <QLabel>
 #include <QMessageBox>
 
@@ -32,32 +33,42 @@ static int hex2bin(QString &x, Passwd *final)
 	return len;
 }
 
-int PwDialog::execute(pass_info *p, Passwd *passwd, bool write, bool abort)
+enum open_result PwDialog::execute(pass_info *p, Passwd *passwd,
+					bool write, bool abort)
 {
-	PwDialog *dlg;
-	int ret;
-	dlg = new PwDialog(p, write);
+#if !defined(Q_OS_WIN32)
+	if (!IS_GUI_APP) {
+		console_write(stdout,
+			QString(COL_CYAN "%1\n" COL_LRED "%2:" COL_RESET)
+				.arg(p->getDescription())
+				.arg(tr("Password")).toUtf8());
+		*passwd = readPass();
+		return pw_ok;
+	}
+#endif
+	PwDialog *dlg = new PwDialog(p, write);
 	if (abort)
 		dlg->addAbortButton();
-	ret = dlg->exec();
+	enum open_result result = (enum open_result)dlg->exec();
 	*passwd = dlg->getPass();
 	delete dlg;
-	return ret;
+	if (result == pw_exit)
+		throw pw_exit;
+	return result;
 }
 
 int PwDialog::pwCallback(char *buf, int size, int rwflag, void *userdata)
 {
-	int ret;
+	Passwd passwd;
+	enum open_result result;
+	pass_info *p = static_cast<pass_info *>(userdata);
 
-	pass_info *p = (pass_info *)userdata;
-	PwDialog *dlg = new PwDialog(p, rwflag);
+	result = PwDialog::execute(p, &passwd, rwflag, false);
 
-	ret = dlg->exec();
-	QByteArray pw = dlg->getPass();
-	size = MIN(size, pw.size());
-	memcpy(buf, pw.constData(), size);
-	delete dlg;
-	return ret == 1 ? size : 0;
+	size = MIN(size, passwd.size());
+	memcpy(buf, passwd.constData(), size);
+	p->setResult(result);
+	return result == pw_ok ? size : 0;
 }
 
 PwDialog::PwDialog(pass_info *p, bool write)
@@ -65,7 +76,7 @@ PwDialog::PwDialog(pass_info *p, bool write)
 {
 	pi = p;
 	setupUi(this);
-	image->setPixmap(pi->getImage());
+	image->setPixmap(QPixmap(pi->getImage()));
 	description->setText(pi->getDescription());
 	title->setText(pi->getType());
 	if (!pi->getTitle().isEmpty())
@@ -113,20 +124,23 @@ void PwDialog::accept()
 
 void PwDialog::buttonPress(QAbstractButton *but)
 {
-	switch (buttonBox->standardButton(but)) {
-	case QDialogButtonBox::Ok:
+	qDebug() << "buttonBox->standardButton(but)" << buttonBox->buttonRole(but) << QDialogButtonBox::DestructiveRole;
+	switch (buttonBox->buttonRole(but)) {
+	case QDialogButtonBox::AcceptRole:
 		accept();
 		break;
-	case QDialogButtonBox::Cancel:
+	case QDialogButtonBox::RejectRole:
 		reject();
 		break;
-	case QDialogButtonBox::Abort:
+	case QDialogButtonBox::ResetRole:
+		done(pw_exit);
+		break;
 	default:
-		done(2);
+		break;
 	}
 }
 
 void PwDialog::addAbortButton()
 {
-	buttonBox->addButton(tr("E&xit"), QDialogButtonBox::ResetRole);
+	buttonBox->addButton(tr("Exit"), QDialogButtonBox::ResetRole);
 }

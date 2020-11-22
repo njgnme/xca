@@ -268,7 +268,7 @@ Especially EC and DSA are only defined with SHA1 in the PKCS#11 specification.</
              </widget>
             </item>
             <item>
-             <widget class="QCheckBox" name="adapt_explicit_subject">
+             <widget class="QCheckBox" name="adapt_explicit_subj">
               <property name="text">
                <string>Dynamically arrange explicit subject entries</string>
               </property>
@@ -325,7 +325,32 @@ Especially EC and DSA are only defined with SHA1 in the PKCS#11 specification.</
       </attribute>
       <layout class="QHBoxLayout" name="horizontalLayout_2">
        <item>
-        <widget class="QListWidget" name="pkcs11List"/>
+        <widget class="QListView" name="pkcs11List">
+         <property name="dragEnabled">
+          <bool>true</bool>
+         </property>
+         <property name="acceptDrops">
+          <bool>true</bool>
+         </property>
+         <property name="dragDropOverwriteMode">
+          <bool>false</bool>
+         </property>
+         <property name="dragDropMode">
+          <enum>QAbstractItemView::InternalMove</enum>
+         </property>
+         <property name="selectionBehavior">
+          <enum>QAbstractItemView::SelectRows</enum>
+         </property>
+         <property name="movement">
+          <enum>QListView::Snap</enum>
+         </property>
+         <property name="resizeMode">
+          <enum>QListView::Adjust</enum>
+         </property>
+         <property name="uniformItemSizes">
+          <bool>true</bool>
+         </property>
+        </widget>
        </item>
        <item>
         <layout class="QVBoxLayout" name="verticalLayout">

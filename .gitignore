@@ -20,7 +20,9 @@ xca_db_stat
 xca_db_stat.exe
 aclocal.m4
 autom4te.cache/
+config.cache
 config.log
 config.status
 configure
 misc/Info.plist
+misc/variables.wxi

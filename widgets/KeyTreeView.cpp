@@ -1,6 +1,6 @@
 /* vi: set sw=4 ts=4:
  *
- * Copyright (C) 2015 Christian Hohnstaedt.
+ * Copyright (C) 2020 Christian Hohnstaedt.
  *
  * All rights reserved.
  */
@@ -8,7 +8,9 @@
 #include "lib/pki_scard.h"
 #include "KeyTreeView.h"
 #include "MainWindow.h"
-#include <QAbstractItemModel>
+#include "KeyDetail.h"
+#include "NewKey.h"
+#include "XcaWarning.h"
 #include <QAbstractItemView>
 #include <QMenu>
 
@@ -17,9 +19,9 @@ void KeyTreeView::fillContextMenu(QMenu *menu, QMenu *subExport,
 {
 	bool multi = indexes.size() > 1;
 
-	pki_key *key = static_cast<pki_key*>(index.internalPointer());
+	pki_key *key = db_base::fromIndex<pki_key>(index);
 
-	if (indexes.size() == 0)
+	if (indexes.size() == 0 || !key)
 		return;
 
 	if (!multi && key && key->isPrivKey() && !key->isToken()) {
@@ -37,7 +39,7 @@ void KeyTreeView::fillContextMenu(QMenu *menu, QMenu *subExport,
 		}
 	}
 
-	if (!pkcs11::loaded() || multi)
+	if (!pkcs11::libraries.loaded() || multi)
 		return;
 
 	if (key->isToken()) {
@@ -55,19 +57,23 @@ void KeyTreeView::fillContextMenu(QMenu *menu, QMenu *subExport,
 
 void KeyTreeView::setOwnPass()
 {
+	if (!basemodel)
+		return;
 	try {
-		keys->setOwnPass(currentIndex(), pki_key::ptPrivate);
+		keys()->setOwnPass(currentIndex(), pki_key::ptPrivate);
 	} catch (errorEx &err) {
-		mainwin->Error(err);
+		XCA_ERROR(err);
 	}
 }
 
 void KeyTreeView::resetOwnPass()
 {
+	if (!basemodel)
+		return;
 	try {
-		keys->setOwnPass(currentIndex(), pki_key::ptCommon);
+		keys()->setOwnPass(currentIndex(), pki_key::ptCommon);
 	} catch (errorEx &err) {
-		mainwin->Error(err);
+		XCA_ERROR(err);
 	}
 }
 
@@ -78,14 +84,14 @@ void KeyTreeView::changePin()
 
 	if (!currentIdx.isValid())
 		return;
-	scard = static_cast<pki_scard*>(currentIdx.internalPointer());
+	scard = db_base::fromIndex<pki_scard>(currentIdx);
 	try {
 		if (!scard->isToken()) {
 			throw errorEx(tr("This is not a token"));
 		}
 		scard->changePin();
 	} catch (errorEx &err) {
-		mainwin->Error(err);
+		XCA_ERROR(err);
 	}
 }
 
@@ -96,14 +102,14 @@ void KeyTreeView::initPin()
 
 	if (!currentIdx.isValid())
 		return;
-	scard = static_cast<pki_scard*>(currentIdx.internalPointer());
+	scard = db_base::fromIndex<pki_scard>(currentIdx);
 	try {
 		if (!scard->isToken()) {
 			throw errorEx(tr("This is not a token"));
 		}
 		scard->initPin();
 	} catch (errorEx &err) {
-		mainwin->Error(err);
+		XCA_ERROR(err);
 	}
 }
 
@@ -114,14 +120,14 @@ void KeyTreeView::changeSoPin()
 
 	if (!currentIdx.isValid())
 		return;
-	scard = static_cast<pki_scard*>(currentIdx.internalPointer());
+	scard = db_base::fromIndex<pki_scard>(currentIdx);
 	try {
 		if (!scard->isToken()) {
 			throw errorEx(tr("This is not a token"));
 		}
 		scard->changeSoPin();
 	} catch (errorEx &err) {
-		mainwin->Error(err);
+		XCA_ERROR(err);
 	}
 }
 
@@ -129,11 +135,11 @@ void KeyTreeView::toToken()
 {
 	QModelIndex currentIdx = currentIndex();
 
-	if (!currentIdx.isValid())
+	if (!currentIdx.isValid() || !basemodel)
 		return;
 
-	pki_key *key = static_cast<pki_scard*>(currentIdx.internalPointer());
-	if (!key || !pkcs11::loaded() || key->isToken())
+	pki_key *key = db_base::fromIndex<pki_key>(currentIdx);
+	if (!key || !pkcs11::libraries.loaded() || key->isToken())
 		return;
 
 	pki_scard *card = NULL;
@@ -149,13 +155,46 @@ void KeyTreeView::toToken()
 		QString msg = tr("Shall the original key '%1' be replaced by the key on the token?\nThis will delete the key '%1' and make it unexportable").
 			arg(key->getIntName());
 		if (XCA_YESNO(msg)) {
-			keys->deletePKI(currentIdx);
-			keys->insertPKI(card);
+			keys()->deletePKI(currentIdx);
+			keys()->insertPKI(card);
 			card = NULL;
 		}
 	} catch (errorEx &err) {
-		mainwin->Error(err);
+		XCA_ERROR(err);
         }
-	if (card)
-		delete card;
+	delete card;
+}
+
+void KeyTreeView::showPki(pki_base *pki) const
+{
+	pki_key *key = dynamic_cast<pki_key *>(pki);
+	if (!key || !basemodel)
+		return;
+
+	KeyDetail *dlg = new KeyDetail(mainwin);
+	if (!dlg)
+		return;
+	dlg->setKey(key);
+
+	if (dlg->exec() && basemodel) {
+		keys()->updateItem(pki, dlg->keyDesc->text(),
+					dlg->comment->toPlainText());
+	}
+	delete dlg;
+}
+
+void KeyTreeView::newItem() {
+	newItem("");
+}
+
+void KeyTreeView::newItem(const QString &name)
+{
+	if (!basemodel)
+		return;
+
+	NewKey *dlg = new NewKey(mainwin, name);
+
+	if (dlg->exec())
+		keys()->newKey(dlg->getKeyJob(), dlg->keyDesc->text());
+	delete dlg;
 }

@@ -1,6 +1,6 @@
 /* vi: set sw=4 ts=4:
  *
- * Copyright (C) 2001 - 2007 Christian Hohnstaedt.
+ * Copyright (C) 2001 - 2020 Christian Hohnstaedt.
  *
  * All rights reserved.
  */
@@ -20,7 +20,7 @@ class load_base
 		QString caption;
 		load_base();
 		virtual ~load_base();
-		virtual pki_base *loadItem(QString s);
+		virtual pki_base *loadItem(const QString &s);
 		virtual pki_base *newItem();
 };
 
@@ -56,7 +56,7 @@ class load_pkcs12: public load_base
 {
 	public:
 		load_pkcs12();
-		pki_base *loadItem(QString s);
+		pki_base *loadItem(const QString &s);
 };
 
 class load_temp: public load_base

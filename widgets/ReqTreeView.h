@@ -14,20 +14,16 @@
 class ReqTreeView: public X509SuperTreeView
 {
 	Q_OBJECT
-	db_x509req *reqs;
+
+	db_x509req *reqs() const
+	{
+		return dynamic_cast<db_x509req*>(basemodel);
+	}
 
     public:
-	ReqTreeView(QWidget *parent) : X509SuperTreeView(parent)
-	{
-		reqs = NULL;
-	}
+	ReqTreeView(QWidget *parent) : X509SuperTreeView(parent) { }
 	void fillContextMenu(QMenu *menu, QMenu *subExport,
 			const QModelIndex &index, QModelIndexList indexes);
-	void setModel(db_x509req *model=NULL)
-	{
-		reqs = model;
-		X509SuperTreeView::setModel(model);
-	}
 
     public slots:
 	void toRequest();

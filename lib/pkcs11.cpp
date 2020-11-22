@@ -18,16 +18,30 @@
 #include <openssl/rand.h>
 #include <openssl/engine.h>
 #include <openssl/evp.h>
+#include <QPushButton>
 #include <QMessageBox>
 #include <QThread>
 
 #include <ltdl.h>
 #include "ui_SelectToken.h"
 #include "widgets/PwDialog.h"
+#include "widgets/XcaWarning.h"
 
 #include "openssl_compat.h"
 
-pkcs11_lib_list pkcs11::libs;
+void waitcursor(int start, int line)
+{
+	qDebug() << "Waitcursor" << (start ? "start" : "end") << line;
+	ign_openssl_error();
+	if (!IS_GUI_APP)
+		return;
+	if (start)
+		QApplication::setOverrideCursor(QCursor(Qt::WaitCursor));
+	else
+		QApplication::restoreOverrideCursor();
+}
+
+pkcs11_lib_list pkcs11::libraries;
 
 pkcs11::pkcs11()
 {
@@ -44,38 +58,7 @@ pkcs11::~pkcs11()
 	}
 }
 
-pkcs11_lib *pkcs11::load_lib(QString fname, bool silent)
-{
-	pkcs11_lib *l;
-	if (fname.isEmpty())
-		return NULL;
-	try {
-		l = libs.add_lib(fname);
-	} catch (errorEx &ex) {
-		if (silent)
-			return NULL;
-		throw ex;
-	}
-	return l;
-}
-
-void pkcs11::load_libs(QString list, bool silent)
-{
-	QStringList errs;
-	if (!list.isEmpty()) {
-		foreach(QString l, list.split('\n')) {
-			try {
-				pkcs11::load_lib(l, silent);
-			} catch (errorEx &err) {
-				errs << err.getString();
-			}
-		}
-		if (errs.count())
-			throw errorEx(errs.join("\n"));
-	}
-}
-
-void pkcs11::startSession(slotid slot, bool rw)
+void pkcs11::startSession(const slotid &slot, bool rw)
 {
 	CK_RV rv;
 	unsigned long flags = CKF_SERIAL_SESSION | (rw ? CKF_RW_SESSION : 0);
@@ -88,8 +71,8 @@ void pkcs11::startSession(slotid slot, bool rw)
 	}
 	CALL_P11_C(slot.lib, C_OpenSession,
 			slot.id, flags, NULL, NULL, &session);
-        if (rv != CKR_OK)
-                pk11error(slot, "C_OpenSession", rv);
+	if (rv != CKR_OK)
+		pk11error(slot, "C_OpenSession", rv);
 	p11slot = slot;
 }
 
@@ -109,7 +92,7 @@ void pkcs11::getRandom()
 		qDebug("C_GenerateRandom: %s", pk11errorString(rv));
 }
 
-QList<CK_MECHANISM_TYPE> pkcs11::mechanismList(slotid slot)
+QList<CK_MECHANISM_TYPE> pkcs11::mechanismList(const slotid &slot)
 {
 	CK_RV rv;
 	CK_MECHANISM_TYPE *m;
@@ -134,7 +117,8 @@ QList<CK_MECHANISM_TYPE> pkcs11::mechanismList(slotid slot)
 	return ml;
 }
 
-void pkcs11::mechanismInfo(slotid slot, CK_MECHANISM_TYPE m, CK_MECHANISM_INFO *info)
+void pkcs11::mechanismInfo(const slotid &slot, CK_MECHANISM_TYPE m,
+						CK_MECHANISM_INFO *info)
 {
 	CK_RV rv;
 	CALL_P11_C(slot.lib, C_GetMechanismInfo, slot.id, m, info);
@@ -160,7 +144,7 @@ bool pkcs11::needsLogin(bool so)
 	p11slot.isValid();
 	CALL_P11_C(p11slot.lib, C_GetSessionInfo, session, &sinfo);
 	if (rv != CKR_OK)
-                pk11error("C_GetSessionInfo", rv);
+		pk11error("C_GetSessionInfo", rv);
 
 	switch (sinfo.state) {
 	case CKS_RO_PUBLIC_SESSION:
@@ -214,7 +198,7 @@ class pinPadLoginThread: public QThread
 		} catch (errorEx &e) {
 			err = e;
 		}
-       }
+	}
 };
 
 static QDialog *newPinPadBox()
@@ -223,7 +207,7 @@ static QDialog *newPinPadBox()
 	box->setWindowTitle(XCA_TITLE);
 	QHBoxLayout *h = new QHBoxLayout(box);
 	QLabel *l = new QLabel();
-	l->setPixmap(*MainWindow::scardImg);
+	l->setPixmap(QPixmap(":scardImg"));
 	l->setMaximumSize(QSize(95, 40));
 	l->setScaledContents(true);
 	h->addWidget(l);
@@ -280,14 +264,15 @@ bool pkcs11::selectToken(slotid *slot, QWidget *w)
 
 	for (int i = 0; i < p11_slots.count(); i++) {
 		try {
-			tkInfo info = tokenInfo(p11_slots[i]);
+			tkInfo info;
+			CK_RV rv = tokenInfo(p11_slots[i], &info);
+			if (rv == CKR_TOKEN_NOT_PRESENT)
+				continue;
 			slotsWithToken.append(i);
 			slotnames << QString("%1 (#%2)").
 				arg(info.label()).arg(info.serial());
 		} catch (errorEx &e) {
-			if (e.info != CKR_TOKEN_NOT_PRESENT) {
-				XCA_WARN(QString("Error: %1").arg(e.getString()));
-			}
+			XCA_WARN(QString("Error: %1").arg(e.getString()));
 		}
 	}
 	switch (slotnames.count()) {
@@ -296,12 +281,12 @@ bool pkcs11::selectToken(slotid *slot, QWidget *w)
 		return false;
 	case 1:
 		*slot = p11_slots[slotsWithToken[0]];
-                return true;
+		return true;
 	}
 	Ui::SelectToken ui;
 	QDialog *select_slot = new QDialog(w);
 	ui.setupUi(select_slot);
-	ui.image->setPixmap(*MainWindow::scardImg);
+	ui.image->setPixmap(QPixmap(":scardImg"));
 	ui.tokenBox->addItems(slotnames);
 	ui.buttonBox->button(QDialogButtonBox::Ok)->setText(QObject::tr("Select"));
 	select_slot->setWindowTitle(XCA_TITLE);
@@ -331,7 +316,7 @@ static QString newSoPinTxt = QObject::tr(
 static QString newPinTxt = QObject::tr(
 		"Please enter the new PIN for the token: '%1'");
 
-void pkcs11::changePin(slotid slot, bool so)
+void pkcs11::changePin(const slotid &slot, bool so)
 {
 	Passwd newPin, pinp;
 	QString pin;
@@ -342,7 +327,7 @@ void pkcs11::changePin(slotid slot, bool so)
 	if (ti.protAuthPath()) {
 		setPin(NULL, 0, NULL, 0);
 		return;
-        }
+	}
 
 	pin = tokenLogin(ti.label(), so, true);
 	if (pin.isNull())
@@ -360,7 +345,7 @@ void pkcs11::changePin(slotid slot, bool so)
 	logout();
 }
 
-void pkcs11::initPin(slotid slot)
+void pkcs11::initPin(const slotid &slot)
 {
 	Passwd newPin, pinp;
 	int ret = 1;
@@ -391,7 +376,7 @@ void pkcs11::initPin(slotid slot)
 	logout();
 }
 
-void pkcs11::initToken(slotid slot, unsigned char *pin, int pinlen,
+void pkcs11::initToken(const slotid &slot, unsigned char *pin, int pinlen,
 		QString label)
 {
 	CK_RV rv;
@@ -405,16 +390,26 @@ void pkcs11::initToken(slotid slot, unsigned char *pin, int pinlen,
 		pk11error(slot, "C_InitToken", rv);
 }
 
-tkInfo pkcs11::tokenInfo(slotid slot)
+tkInfo pkcs11::tokenInfo(const slotid &slot)
+{
+	tkInfo ti;
+	CK_RV rv = tokenInfo(slot, &ti);
+
+	if (rv != CKR_OK) {
+		pk11error(slot, "C_GetTokenInfo", rv);
+	}
+	return ti;
+}
+
+CK_RV pkcs11::tokenInfo(const slotid &slot, tkInfo *tkinfo)
 {
 	CK_TOKEN_INFO token_info;
 	CK_RV rv;
 
 	CALL_P11_C(slot.lib, C_GetTokenInfo, slot.id, &token_info);
-	if (rv != CKR_OK) {
-		pk11error(slot, "C_GetTokenInfo", rv);
-	}
-	return tkInfo(&token_info);
+	if (rv == CKR_OK)
+		tkinfo->set(&token_info);
+	return rv;
 }
 
 void pkcs11::loadAttribute(pk11_attribute &attribute, CK_OBJECT_HANDLE object)
@@ -489,7 +484,7 @@ pk11_attr_data pkcs11::generateKey(QString name, unsigned long mech,
 
 	pk11_attr_data new_id = findUniqueID(CKO_PUBLIC_KEY);
 
-        pub_atts << label << new_id <<
+	pub_atts << label << new_id <<
 		pk11_attr_ulong(CKA_CLASS, CKO_PUBLIC_KEY) <<
 		pk11_attr_bool(CKA_TOKEN, true) <<
 		pk11_attr_bool(CKA_PRIVATE, false) <<

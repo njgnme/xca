@@ -22,11 +22,9 @@ class Options: public QDialog, public Ui::Options
 		QStringList string_opts;
 		QString getDnString(QListWidget *w);
 		void setDnString(QString dn, QListWidget *w);
-		void setupPkcs11Provider(QString list);
-		QString getPkcs11Provider();
-		MainWindow *mw;
+
 	public:
-		Options(MainWindow *parent);
+		Options(QWidget *parent);
 		~Options();
 		int exec();
 

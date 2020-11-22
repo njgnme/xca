@@ -6,15 +6,21 @@
  */
 
 #include "pki_base.h"
+#include "pki_temp.h"
 #include "db_x509super.h"
+#include "database_model.h"
+#include "oid.h"
+
 #include "widgets/MainWindow.h"
 #include "widgets/CertDetail.h"
 #include "widgets/XcaDialog.h"
-#include "oid.h"
-#include <QMessageBox>
+#include "widgets/XcaWarning.h"
 
-db_x509name::db_x509name(MainWindow *mw)
-	:db_base(mw)
+#include <QFileDialog>
+#include <QFileInfo>
+
+db_x509name::db_x509name(const char *classname)
+	:db_base(classname)
 {
 }
 
@@ -26,28 +32,26 @@ dbheaderList db_x509name::getHeaders()
 		new num_dbheader(HD_subject_hash, false, tr("Subject hash"),
 			tr("Hash to lookup certs in directories"));
 
-	foreach(int nid, *MainWindow::dn_nid)
+	foreach(int nid, distname_nid)
 		h << new nid_dbheader(nid, dbheader::hd_x509name);
 	return h;
 }
 
-db_x509super::db_x509super(MainWindow *mw)
-	:db_x509name(mw)
+db_x509super::db_x509super(const char *classname)
+	:db_x509name(classname)
 {
+	pkitype_depends << asym_key << smartCard;
 }
 
 void db_x509super::loadContainer()
 {
 	db_x509name::loadContainer();
 	/* Resolve Key references */
-	FOR_ALL_pki(pki, pki_x509super) {
+	foreach(pki_x509super *pki, Store.getAll<pki_x509super>()) {
 		QVariant keySqlId = pki->getKeySqlId();
 		if (!keySqlId.isValid())
 			continue;
-		quint64 id = keySqlId.toULongLong();
-		if (!lookup.contains(id))
-			continue;
-		pki->setRefKey(static_cast<pki_key*>(lookup[id]));
+		pki->setRefKey(Store.lookupPki<pki_key>(keySqlId));
 	}
 }
 
@@ -75,10 +79,15 @@ dbheaderList db_x509super::getHeaders()
 		NID_netscape_comment;
 
 	h <<	new dbheader(HD_x509key_name, false, tr("Key name"),
-			tr("Internal name of the key")) <<
-		new dbheader(HD_x509_sigalg, false, tr("Signature algorithm"));
-
-
+			tr("Internal name of the key"))
+	<<	new dbheader(HD_x509_sigalg, false,
+			tr("Signature algorithm"))
+	<<	new key_dbheader(HD_key_type, tr("Key type"))
+	<<	new key_dbheader(HD_key_size, tr("Key size"))
+#ifndef OPENSSL_NO_EC
+	<<	new key_dbheader(HD_key_curve, tr("EC Group"))
+#endif
+	;
 	foreach(int nid, v3nid)
 		h << new nid_dbheader(nid, dbheader::hd_v3ext);
 
@@ -89,6 +98,7 @@ dbheaderList db_x509super::getHeaders()
 
 pki_key *db_x509super::findKey(pki_x509super *ref)
 {
+	db_key *keys = Database.model<db_key>();
 	pki_key *key, *refkey;
 	if (!ref)
 		return NULL;
@@ -97,17 +107,16 @@ pki_key *db_x509super::findKey(pki_x509super *ref)
 	refkey = ref->getPubKey();
 	if (!refkey)
 		return NULL;
-	key = (pki_key *)mainwin->keys->getByReference(refkey);
+	key = dynamic_cast<pki_key *>(keys->getByReference(refkey));
 	ref->setRefKey(key);
-	delete(refkey);
-
+	delete refkey;
 	return key;
 }
 
 QList<pki_x509super *> db_x509super::findByPubKey(pki_key *refkey)
 {
 	QList<pki_x509super *> list;
-	FOR_ALL_pki(pki, pki_x509super) {
+	foreach(pki_x509super *pki, Store.getAll<pki_x509super>()) {
 		pki_key *key = pki->getPubKey();
 		if (!key)
 			continue;
@@ -120,9 +129,9 @@ QList<pki_x509super *> db_x509super::findByPubKey(pki_key *refkey)
 
 void db_x509super::extractPubkey(QModelIndex index)
 {
+	db_key *keys = Database.model<db_key>();
 	pki_key *key;
-	pki_x509super *pki = static_cast<pki_x509super*>
-				(index.internalPointer());
+	pki_x509super *pki = fromIndex<pki_x509super>(index);
 	if (!pki)
 		return;
 	key = pki->getPubKey();
@@ -134,7 +143,7 @@ void db_x509super::extractPubkey(QModelIndex index)
 		.arg(pki->getType() == x509 ?
 			tr("Certificate") : tr("Certificate request"))
 		.arg(pki->getIntName()));
-	key = (pki_key*)mainwin->keys->insert(key);
+	key = dynamic_cast<pki_key*>(keys->insert(key));
 	if (!key)
 		return;
 	if (Settings["suppress_messages"])
@@ -144,23 +153,23 @@ void db_x509super::extractPubkey(QModelIndex index)
 
 void db_x509super::toOpenssl(QModelIndex index) const
 {
-	pki_x509super *pki = static_cast<pki_x509super*>(index.internalPointer());
-	QString fn = Settings["workingdir"] + QDir::separator() +
-		pki->getUnderlinedName() + ".conf";
-	QString fname = QFileDialog::getSaveFileName(mainwin,
+	pki_x509super *pki = fromIndex<pki_x509super>(index);
+	QString fn = Settings["workingdir"] + pki->getUnderlinedName() + ".conf";
+	QString fname = QFileDialog::getSaveFileName(NULL,
 		tr("Save as OpenSSL config"),	fn,
 		tr("Config files ( *.conf *.cnf);; All files ( * )"));
 	if (fname.isEmpty())
 		return;
-	fname = nativeSeparator(fname);
-	Settings["workingdir"] = fname.mid(0, fname.lastIndexOf(QRegExp("[/\\\\]")));
+
+	update_workingdir(fname);
 	pki->opensslConf(fname);
 }
 
 void db_x509super::toTemplate(QModelIndex index)
 {
-	pki_x509super *pki = static_cast<pki_x509super*>(index.internalPointer());
-	if (!pki)
+	db_temp *temps = Database.model<db_temp>();
+	pki_x509super *pki = fromIndex<pki_x509super>(index);
+	if (!pki || !temps)
 		return;
 
 	try {
@@ -175,9 +184,9 @@ void db_x509super::toTemplate(QModelIndex index)
 				QString("</h3><hr>") +
 				el.getHtml("<br>");
 			QTextEdit *textbox = new QTextEdit(etext);
-		        XcaDialog *d = new XcaDialog(mainwin, x509, textbox,
+		        XcaDialog *d = new XcaDialog(NULL, x509, textbox,
 						QString(), QString());
-			d->aboutDialog(MainWindow::tempImg);
+			d->aboutDialog(QPixmap(":tempImg"));
 		        d->exec();
 		        delete d;
 		}
@@ -186,45 +195,9 @@ void db_x509super::toTemplate(QModelIndex index)
 			.arg(pki->getType() == x509 ?
 				tr("Certificate") : tr("Certificate request"))
 			.arg(pki->getIntName()));
-		createSuccess(mainwin->temps->insert(temp));
+		createSuccess(temps->insert(temp));
 	}
 	catch (errorEx &err) {
-		mainwin->Error(err);
+		XCA_ERROR(err);
 	}
-}
-
-void db_x509super::showPki(pki_base *pki)
-{
-	pki_x509super *x = dynamic_cast<pki_x509super *>(pki);
-	if (!x)
-		return;
-	CertDetail *dlg = new CertDetail(mainwin);
-	if (!dlg)
-		return;
-
-	switch (x->getType()) {
-		case x509_req: dlg->setReq((pki_x509req*)x); break;
-		case x509: dlg->setCert((pki_x509*)x); break;
-		default:
-			delete dlg;
-			return;
-	}
-	connect(dlg->privKey, SIGNAL(doubleClicked(QString)),
-		mainwin->keys, SLOT(showItem(QString)));
-	connect(dlg->signature, SIGNAL(doubleClicked(QString)),
-		this, SLOT(showItem(QString)));
-	connect(this, SIGNAL(pkiChanged(pki_base*)),
-		dlg, SLOT(itemChanged(pki_base*)));
-	connect(mainwin->keys, SIGNAL(pkiChanged(pki_base*)),
-		dlg, SLOT(itemChanged(pki_base*)));
-	if (dlg->exec()) {
-		QString newname = dlg->descr->text();
-		QString newcomment = dlg->comment->toPlainText();
-		if (newname != pki->getIntName() ||
-		    newcomment != pki->getComment())
-		{
-			updateItem(pki, newname, newcomment);
-		}
-	}
-	delete dlg;
 }

@@ -1,13 +1,13 @@
 /* vi: set sw=4 ts=4:
  *
- * Copyright (C) 2001 - 2015 Christian Hohnstaedt.
+ * Copyright (C) 2001 - 2020 Christian Hohnstaedt.
  *
  * All rights reserved.
  */
 
 #include "load_obj.h"
 #include "pki_x509.h"
-#include "pki_key.h"
+#include "pki_evp.h"
 #include "pki_x509req.h"
 #include "pki_pkcs7.h"
 #include "pki_pkcs12.h"
@@ -21,7 +21,7 @@ load_base::load_base()
 	caption = "";
 }
 
-pki_base *load_base::loadItem(QString s)
+pki_base *load_base::loadItem(const QString &s)
 {
 	pki_base *pki = newItem();
 	if (!pki)
@@ -35,6 +35,8 @@ pki_base *load_base::loadItem(QString s)
 		throw err;
 	}
 	pki->pkiSource = imported;
+	pki->autoIntName(s);
+	pki->setFilename(s);
 	return pki;
 }
 
@@ -53,6 +55,7 @@ load_key::load_key()
 {
 	filter = QObject::tr("PKI Keys ( *.pem *.der *.key );; "
 			"PKCS#8 Keys ( *.p8 *.pk8 );; "
+			"Microsoft PVK Keys ( *.pvk );; "
 			"SSH Public Keys ( *.pub );;") + filter;
 	caption = QObject::tr("Import RSA key");
 }
@@ -109,7 +112,7 @@ load_pkcs12::load_pkcs12()
 	caption = QObject::tr("Import PKCS#12 Private Certificate");
 }
 
-pki_base * load_pkcs12::loadItem(QString s)
+pki_base * load_pkcs12::loadItem(const QString &s)
 {
 	pki_base *p12 = new pki_pkcs12(s);
 	return p12;

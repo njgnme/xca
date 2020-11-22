@@ -7,22 +7,23 @@
 
 
 #include "db_crl.h"
+#include "main.h"
 #include "exception.h"
-#include "widgets/MainWindow.h"
+#include "database_model.h"
 #include "widgets/CrlDetail.h"
 #include "widgets/NewCrl.h"
 #include <QMessageBox>
 #include <QContextMenuEvent>
 #include "widgets/XcaDialog.h"
+#include "widgets/XcaWarning.h"
 #include "widgets/ItemCombo.h"
 #include "ui_NewCrl.h"
 
-db_crl::db_crl(MainWindow *mw)
-	:db_x509name(mw)
+db_crl::db_crl() : db_x509name("crls")
 {
-	class_name = "crls";
 	sqlHashTable = "crls";
 	pkitype << revocation;
+	pkitype_depends << x509;
 	updateHeaders();
 	loadContainer();
 }
@@ -54,13 +55,16 @@ void db_crl::load()
 
 void db_crl::revokeCerts(pki_crl *crl)
 {
+	db_x509 *certs = Database.model<db_x509>();
 	x509revList revlist;
 
-	if (!mainwin->certs)
+	if (!certs)
 		return;
+
 	pki_x509 *signer = crl->getIssuer();
 	if (!signer)
 		return;
+
 	revlist = crl->getRevList();
 	signer->mergeRevList(revlist);
 	foreach(x509rev revok, revlist) {
@@ -72,7 +76,7 @@ void db_crl::revokeCerts(pki_crl *crl)
 
 void db_crl::removeSigner(pki_base *signer)
 {
-	FOR_ALL_pki(crl, pki_crl) {
+	foreach(pki_crl *crl, Store.getAll<pki_crl>()) {
 		if (crl->getIssuer() == signer) {
 			crl->setIssuer(NULL);
 		}
@@ -81,11 +85,11 @@ void db_crl::removeSigner(pki_base *signer)
 
 void db_crl::inToCont(pki_base *pki)
 {
-	pki_crl *crl = static_cast<pki_crl *>(pki);
+	pki_crl *crl = dynamic_cast<pki_crl *>(pki);
 	unsigned hash = crl->getSubject().hashNum();
 	QList<pki_x509 *> items;
 
-	items = sqlSELECTpki<pki_x509>(
+	items = Store.sqlSELECTpki<pki_x509>(
 		"SELECT x509super.item FROM x509super "
 		"JOIN certs ON certs.item = x509super.item "
 		"WHERE x509super.subj_hash=? AND certs.ca=1",
@@ -99,7 +103,7 @@ void db_crl::inToCont(pki_base *pki)
 
 pki_base *db_crl::insert(pki_base *item)
 {
-	pki_crl *crl = static_cast<pki_crl *>(item);
+	pki_crl *crl = dynamic_cast<pki_crl *>(item);
 	pki_crl *oldcrl = dynamic_cast<pki_crl *>(getByReference(crl));
 	if (oldcrl) {
 		XCA_INFO(tr("The revocation list already exists in the database as:\n'%1'\nand so it was not imported").arg(oldcrl->getIntName()));
@@ -115,146 +119,46 @@ pki_base *db_crl::insert(pki_base *item)
 	return crl;
 }
 
-void db_crl::showPki(pki_base *pki)
-{
-	pki_crl *crl = dynamic_cast<pki_crl *>(pki);
-	if (!crl)
-		return;
-	CrlDetail *dlg = new CrlDetail(mainwin);
-	if (!dlg)
-		return;
-
-	dlg->setCrl(crl);
-	connect(dlg->issuerIntName, SIGNAL(doubleClicked(QString)),
-		mainwin->certs, SLOT(showItem(QString)));
-	connect(mainwin->certs, SIGNAL(pkiChanged(pki_base*)),
-		dlg, SLOT(itemChanged(pki_base*)));
-	if (dlg->exec()) {
-		QString newname = dlg->descr->text();
-		QString newcomment = dlg->comment->toPlainText();
-		if (newname != pki->getIntName() ||
-		    newcomment != pki->getComment())
-		{
-			updateItem(pki, newname, newcomment);
-		}
-	}
-	delete dlg;
-}
-
 void db_crl::store(QModelIndex index)
 {
-	QList<exportType> types;
+	pki_crl *crl = fromIndex<pki_crl>(index);
 
-	if (!index.isValid())
-		return;
-	pki_crl *crl = static_cast<pki_crl*>(index.internalPointer());
-	if (!crl)
+	if (!index.isValid() || !crl)
 		return;
 
-	types <<
+	QList<exportType> types; types <<
 		exportType(exportType::PEM, "pem", "PEM") <<
 		exportType(exportType::DER, "der", "DER") <<
 		exportType(exportType::vcalendar, "ics", "vCalendar");
-	ExportDialog *dlg = new ExportDialog(mainwin,
+	ExportDialog *dlg = new ExportDialog(NULL,
 			tr("Revocation list export"),
 			tr("CRL ( *.pem *.der *.crl )"), crl,
-			MainWindow::revImg, types);
+			QPixmap(":revImg"), types);
 	if (!dlg->exec()) {
 		delete dlg;
 		return;
 	}
-	QString fname = dlg->filename->text();
-
 	try {
+		XFile file(dlg->filename->text());
+		pki_base::pem_comment = dlg->pemComment->isChecked();
+		file.open_key();
 		if (dlg->type() == exportType::vcalendar) {
-			writeVcalendar(fname, crl->icsVEVENT());
+			writeVcalendar(file, crl->icsVEVENT());
 		} else {
-			crl->writeCrl(fname, dlg->type() == exportType::PEM);
+			crl->writeCrl(file, dlg->type() == exportType::PEM);
 		}
 	}
 	catch (errorEx &err) {
-		mainwin->Error(err);
+		XCA_ERROR(err);
 	}
+	pki_base::pem_comment = false;
 	delete dlg;
 }
 
-#if 0
-void db_crl::updateRevocations(pki_x509 *cert)
+pki_crl *db_crl::newCrl(const crljob &task)
 {
-	x509name issname = cert->getSubject();
-	x509revList revlist;
-	pki_crl *latest = NULL;
-
-	FOR_ALL_pki(crl, pki_crl) {
-		if (!(issname == crl->getSubject()))
-			continue;
-		pki_key *key = cert->getPubKey();
-		if (!key)
-			continue;
-		if (!crl->verify(key)) {
-			delete key;
-			continue;
-		}
-		delete key;
-		pki_x509 *old = crl->getIssuer();
-		if (!old) {
-			crl->setIssuer(cert);
-		} else if (old != cert) {
-			if (old->getNotAfter() < cert->getNotAfter())
-				crl->setIssuer(cert);
-		}
-		if (!latest || (latest->getCrlNumber() < crl->getCrlNumber()))
-			latest = crl;
-	}
-	if (latest) {
-		revlist = latest->getRevList();
-		cert->mergeRevList(revlist);
-		cert->setCrlNumber(latest->getCrlNumber());
-	}
-}
-#endif
-
-void db_crl::newItem()
-{
-	QList<pki_x509 *> cas = mainwin->certs->getAllIssuers();
-	pki_x509 *ca = NULL;
-
-	switch (cas.size()) {
-	case 0:
-		XCA_INFO(tr("There are no CA certificates for CRL generation"));
-		return;
-	case 1:
-		ca = cas[0];
-		break;
-	default: {
-		itemComboCert *c = new itemComboCert(NULL);
-		XcaDialog *d = new XcaDialog(mainwin, revocation, c,
-			tr("Select CA certificate"), QString());
-		c->insertPkiItems(cas);
-		if (!d->exec()) {
-			delete d;
-			return;
-		}
-		ca = c->currentPkiItem();
-		delete d;
-		}
-	}
-	newItem(ca);
-}
-
-void db_crl::newItem(pki_x509 *cert)
-{
-	if (!cert)
-		return;
-
 	pki_crl *crl = NULL;
-	NewCrl *widget = new NewCrl(NULL, cert);
-	XcaDialog *dlg = new XcaDialog(mainwin, revocation, widget,
-					tr("Create CRL"), QString());
-	if (!dlg->exec()) {
-		delete dlg;
-		return;
-	}
+	pki_x509 *cert = task.issuer;
 	QSqlDatabase db = QSqlDatabase::database();
 	try {
 		x509v3ext e;
@@ -267,44 +171,41 @@ void db_crl::newItem(pki_x509 *cert)
 		crl->createCrl(cert->getIntName(), cert);
 		crl->pkiSource = generated;
 
-		bool withReason = widget->revocationReasons->isChecked();
 		foreach(x509rev rev, cert->getRevList())
-			crl->addRev(rev, withReason);
+			crl->addRev(rev, task.withReason);
 
-		if (widget->authKeyId->isChecked()) {
+		if (task.authKeyId) {
 			crl->addV3ext(e.create(NID_authority_key_identifier,
 				"keyid,issuer", &ext_ctx));
 		}
-		if (widget->subAltName->isChecked()) {
+		if (task.subAltName) {
 			if (cert->hasExtension(NID_subject_alt_name)) {
 				crl->addV3ext(e.create(NID_issuer_alt_name,
 					"issuer:copy", &ext_ctx));
 			}
 		}
-		if (widget->setCrlNumber->isChecked()) {
-			a1int num;
-			num.setDec(widget->crlNumber->text());
-			crl->setCrlNumber(num);
-			cert->setCrlNumber(num);
+		if (task.setCrlNumber) {
+			crl->setCrlNumber(task.crlNumber);
+			cert->setCrlNumber(task.crlNumber);
 		}
 		crl->setIssuer(cert);
-		crl->setLastUpdate(widget->lastUpdate->getDate());
-		crl->setNextUpdate(widget->nextUpdate->getDate());
-		crl->sign(cert->getRefKey(), widget->hashAlgo->currentHash());
+		crl->setLastUpdate(task.lastUpdate);
+		crl->setNextUpdate(task.nextUpdate);
+		crl->sign(cert->getRefKey(), task.hashAlgo);
 
 		Transaction;
 		if (!TransBegin())
 			throw errorEx(tr("Failed to initiate DB transaction"));
-		cert->setCrlExpire(widget->nextUpdate->getDate());
+		cert->setCrlExpire(task.nextUpdate);
 		SQL_PREPARE(q, "UPDATE authority set crlNo=?, crlExpire=? WHERE item=?");
 		q.bindValue(0, (uint)cert->getCrlNumber().getLong());
-		q.bindValue(1, widget->nextUpdate->getDate().toPlain());
+		q.bindValue(1, task.nextUpdate.toPlain());
 		q.bindValue(2, cert->getSqlItemId());
 		AffectedItems(cert->getSqlItemId());
 		q.exec();
 		QSqlError err = q.lastError();
 		if (err.isValid())
-			throw errorEx(tr("Database error: ").arg(err.text()));
+			throw errorEx(tr("Database error: %1").arg(err.text()));
 		SQL_PREPARE(q, "UPDATE revocations set crlNo=? "
 				"WHERE crlNo IS NULL AND caId=?");
 		q.bindValue(0, (uint)crl->getCrlNumber().getLong());
@@ -312,20 +213,18 @@ void db_crl::newItem(pki_x509 *cert)
 		q.exec();
 		err = q.lastError();
 		if (err.isValid())
-			throw errorEx(tr("Database error: ").arg(err.text()));
+			throw errorEx(tr("Database error: %1").arg(err.text()));
 		insertPKI(crl);
 		err = db.lastError();
 		if (err.isValid())
-			throw errorEx(tr("Database error: ").arg(err.text()));
+			throw errorEx(tr("Database error: %1").arg(err.text()));
 		TransCommit();
 		createSuccess((crl));
 	}
 	catch (errorEx &err) {
-		MainWindow::Error(err);
-		if (crl)
-			delete crl;
+		XCA_ERROR(err);
+		delete crl;
 		crl = NULL;
 	}
-	delete dlg;
-	return;
+	return crl;
 }

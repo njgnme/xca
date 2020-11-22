@@ -1,6 +1,6 @@
 /* vi: set sw=4 ts=4:
  *
- * Copyright (C) 2001 - 2011 Christian Hohnstaedt.
+ * Copyright (C) 2001 - 2020 Christian Hohnstaedt.
  *
  * All rights reserved.
  */
@@ -17,7 +17,7 @@
 #define PEM_STRING_XCA_TEMPLATE "XCA TEMPLATE"
 #define TMPL_VERSION 10
 
-#define CHECK_TMPL_KEY if (!tmpl_keys.contains(key)) { qDebug("Unknown template key: %s(%s)",  __func__, CCHAR(key)); }
+#define CHECK_TMPL_KEY if (!tmpl_keys.contains(key)) { qFatal("Unknown template key: %s(%s)",  __func__, CCHAR(key)); }
 
 #define VIEW_temp_version 6
 #define VIEW_temp_template 7
@@ -26,9 +26,9 @@ class pki_temp: public pki_x509name
 {
 		Q_OBJECT
 	protected:
-		static QList<QString> tmpl_keys;
+		static const QList<QString> tmpl_keys;
 		int dataSize();
-		void try_fload(QString fname, const char *mode);
+		void try_fload(XFile &file);
 		bool pre_defined;
 		x509name xname;
 		QMap<QString, QString> settings;
@@ -36,9 +36,10 @@ class pki_temp: public pki_x509name
 		void fromExtList(extList *el, int nid, const char *item);
 
 	public:
-		static QPixmap *icon;
+		pki_temp(const pki_temp *pk);
+		pki_temp(const QString &d = QString());
+		~pki_temp();
 
-		// methods
 		QString getSetting(QString key)
 		{
 			CHECK_TMPL_KEY
@@ -59,11 +60,8 @@ class pki_temp: public pki_x509name
 			CHECK_TMPL_KEY
 			settings[key] = QString::number(value);
 		}
-		pki_temp(const pki_temp *pk);
-		pki_temp(const QString d = QString());
-		void fload(const QString fname);
-		void writeDefault(const QString fname);
-		~pki_temp();
+		void fload(const QString &fname);
+		void writeDefault(const QString &dirname) const ;
 		void fromData(const unsigned char *p, int size, int version);
 		void old_fromData(const unsigned char *p, int size, int version);
 		void fromData(const unsigned char *p, db_header_t *head );
@@ -73,13 +71,13 @@ class pki_temp: public pki_x509name
 			pre_defined = true;
 		}
 		QString comboText() const;
-		QByteArray toData();
+		QByteArray toData() const;
 		QString toB64Data()
 		{
 			return QString::fromLatin1(toData().toBase64());
 		}
 		bool compare(const pki_base *ref) const;
-		void writeTemp(QString fname);
+		void writeTemp(XFile &file) const;
 		QVariant getIcon(const dbheader *hd) const;
 		QString getMsg(msg_type msg) const;
 		x509name getSubject() const;
@@ -87,9 +85,9 @@ class pki_temp: public pki_x509name
 		{
 			xname = n;
 		}
-		BIO *pem(BIO *b, int format);
-		QByteArray toExportData();
-		void fromPEM_BIO(BIO *, QString);
+		bool pem(BioByteArray &, int);
+		QByteArray toExportData() const;
+		void fromPEM_BIO(BIO *, const QString &);
 		void fromExportData(QByteArray data);
 		extList fromCert(pki_x509super *cert_or_req);
 		QSqlError insertSqlData();

@@ -1,6 +1,6 @@
 /* vi: set sw=4 ts=4:
  *
- * Copyright (C) 2001 - 2015 Christian Hohnstaedt.
+ * Copyright (C) 2001 - 2020 Christian Hohnstaedt.
  *
  * All rights reserved.
  */
@@ -8,6 +8,7 @@
 #include "pki_temp.h"
 #include "func.h"
 #include "db.h"
+#include "oid.h"
 #include "exception.h"
 #include "widgets/MainWindow.h"
 #include <QDir>
@@ -16,47 +17,46 @@
 
 #define TEMPLATE_DS_VERSION (QDataStream::Qt_4_2)
 
-QList<QString> pki_temp::tmpl_keys = QList<QString>()
-	<< "subAltName"
-	<< "issAltName"
-	<< "crlDist"
-	<< "authInfAcc"
-	<< "nsCertType"
-	<< "nsComment"
-	<< "nsBaseUrl"
-	<< "nsRevocationUrl"
-	<< "nsCARevocationUrl"
-	<< "nsRenewalUrl"
-	<< "nsCaPolicyUrl"
-	<< "nsSslServerName"
-	<< "ca"
-	<< "bcCritical"
-	<< "ekuCritical"
-	<< "kuCritical"
-	<< "subKey"
-	<< "authKey"
-	<< "basicPath"
-	<< "validN"
-	<< "validM"
-	<< "validMidn"
-	<< "keyUse"
-	<< "eKeyUse"
-	<< "adv_ext"
-	<< "noWellDefinedExpDate";
-
-QPixmap *pki_temp::icon = NULL;
+const QList<QString> pki_temp::tmpl_keys = {
+	"subAltName",
+	"issAltName",
+	"crlDist",
+	"authInfAcc",
+	"nsCertType",
+	"nsComment",
+	"nsBaseUrl",
+	"nsRevocationUrl",
+	"nsCARevocationUrl",
+	"nsRenewalUrl",
+	"nsCaPolicyUrl",
+	"nsSslServerName",
+	"ca",
+	"bcCritical",
+	"ekuCritical",
+	"kuCritical",
+	"subKey",
+	"authKey",
+	"basicPath",
+	"validN",
+	"validM",
+	"validMidn",
+	"keyUse",
+	"eKeyUse",
+	"adv_ext",
+	"noWellDefinedExpDate",
+	"OCSPstaple",
+};
 
 pki_temp::pki_temp(const pki_temp *pk)
-	:pki_x509name(pk->desc)
+	:pki_x509name(pk)
 {
-	pkiType = pk->pkiType;
 	pre_defined = false;
 
 	xname = pk->xname;
 	settings = pk->settings;
 }
 
-pki_temp::pki_temp(const QString d)
+pki_temp::pki_temp(const QString &d)
 	:pki_x509name(d)
 {
 	pkiType = tmpl;
@@ -207,18 +207,27 @@ extList pki_temp::fromCert(pki_x509super *cert_or_req)
 	}
 	settings["authKey"] = el.delByNid(NID_authority_key_identifier) ? "1" : "0";
 	settings["subKey"] =  el.delByNid(NID_subject_key_identifier) ? "1" : "0";
+	settings["OCSPstaple"] = el.delByNid(NID_tlsfeature) ? "1" : "0";
 
 	int nsCT = bitsToInt(el, NID_netscape_cert_type, NULL);
 	/* bit 4 is unused. Move higher bits down. */
 	settings["nsCertType"] = QString::number(
 				(nsCT & 0xf) | ((nsCT & 0xf0) >> 1));
 
-	bool keyUseCritical;
+	bool kuCritical;
 	settings["keyUse"] = QString::number(
-				bitsToInt(el, NID_key_usage, &keyUseCritical));
+				bitsToInt(el, NID_key_usage, &kuCritical));
 
-	settings["keyUseCritical"] = keyUseCritical ? "1" : "0";
+	settings["kuCritical"] = kuCritical ? "1" : "0";
 	fromExtList(&el, NID_ext_key_usage, "eKeyUse");
+	QStringList eKeyUse = settings["eKeyUse"].split(QRegExp(",\\s*"));
+	settings["ekuCritical"] = "0";
+	if (eKeyUse.contains("critical")) {
+		eKeyUse.removeOne("critical");
+		settings["eKeyUse"] = eKeyUse.join(", ");
+		settings["ekuCritical"] = "1";
+	}
+	qDebug() << "eKeyUse" << settings["kuCritical"] << settings["eKeyUse"];
 
 	el.genGenericConf(&adv_ext);
 	settings["adv_ext"] = adv_ext;
@@ -265,11 +274,10 @@ void pki_temp::fromData(const unsigned char *p, db_header_t *head )
 static QString old_eKeyUse2QString(int old)
 {
 	QStringList sl;
-	NIDlist eku_nid = *MainWindow::eku_nid;
 
-        for (int i=0; i<eku_nid.count(); i++) {
+        for (int i = 0; i < extkeyuse_nid.count(); i++) {
 		if (old & (1<<i)) {
-			sl << OBJ_nid2sn(eku_nid[i]);
+			sl << OBJ_nid2sn(extkeyuse_nid[i]);
 		}
 	}
 	return sl.join(", ");
@@ -281,8 +289,8 @@ void pki_temp::old_fromData(const unsigned char *p, int size, int version)
 
 	/* destination = */ db::stringFromData(ba);
 	settings["bcCritical"] = QString::number(db::boolFromData(ba));
-	settings["keyUseCritical"] = QString::number(db::boolFromData(ba));
-	settings["eKyUseCritical"] = QString::number(db::boolFromData(ba));
+	settings["kuCritical"] = QString::number(db::boolFromData(ba));
+	settings["ekuCritical"] = QString::number(db::boolFromData(ba));
 	settings["subKey"] = QString::number(db::boolFromData(ba));
 	settings["authKey"] = QString::number(db::boolFromData(ba));
 	settings["ca"] = QString::number(db::intFromData(ba));
@@ -328,7 +336,7 @@ void pki_temp::old_fromData(const unsigned char *p, int size, int version)
 	}
 }
 
-QByteArray pki_temp::toData()
+QByteArray pki_temp::toData() const
 {
 	QByteArray ba;
 
@@ -351,6 +359,14 @@ void pki_temp::fromData(QByteArray &ba, int version)
 	QDataStream in(&buf);
 	in.setVersion(TEMPLATE_DS_VERSION);
 	in >> settings;
+	QMap<QString, QString> translate;
+	translate["eKyUseCritical"] = "ekuCritical";
+	translate["keyUseCritical"] ="kuCritical";
+
+	foreach(QString key, translate.keys()) {
+		if (settings.contains(key))
+			settings[translate[key]] = settings.take(key);
+	}
 	buf.close();
 	(void)version;
 	//if (version < 11) ....
@@ -366,7 +382,7 @@ void pki_temp::fromData(const unsigned char *p, int size, int version)
 	}
 }
 
-QByteArray pki_temp::toExportData()
+QByteArray pki_temp::toExportData() const
 {
 	QByteArray data, header;
 	data = toData();
@@ -376,33 +392,24 @@ QByteArray pki_temp::toExportData()
 	return header;
 }
 
-void pki_temp::writeTemp(QString fname)
+void pki_temp::writeTemp(XFile &file) const
 {
-	FILE *fp = fopen_write(fname);
-
-	if (fp == NULL) {
-		fopen_error(fname);
-		return;
-	}
-	fwrite_ba(fp, toExportData(), fname);
-	fclose(fp);
+	PEM_file_comment(file);
+	file.write(toExportData());
 }
 
-void pki_temp::writeDefault(const QString fname)
+void pki_temp::writeDefault(const QString &dirname) const
 {
-	writeTemp(get_dump_filename(fname, ".xca"));
+	XFile file(get_dump_filename(dirname, ".xca"));
+        file.open_write();
+	writeTemp(file);
 }
 
-BIO *pki_temp::pem(BIO *b, int format)
+bool pki_temp::pem(BioByteArray &b, int)
 {
-	(void)format;
 	QByteArray ba = toExportData();
-        if (!b)
-		b = BIO_new(BIO_s_mem());
-	PEM_write_bio(b, PEM_STRING_XCA_TEMPLATE, (char*)"",
+	return PEM_write_bio(b, PEM_STRING_XCA_TEMPLATE, (char*)"",
 		(unsigned char*)(ba.data()), ba.size());
-	pki_openssl_error();
-	return b;
 }
 
 void pki_temp::fromExportData(QByteArray data)
@@ -418,61 +425,37 @@ void pki_temp::fromExportData(QByteArray data)
 		data.size(), version);
 }
 
-void pki_temp::try_fload(QString fname, const char *mode)
+void pki_temp::try_fload(XFile &file)
 {
-	FILE *fp = fopen(QString2filename(fname), mode);
-	char buf[4096];
-	QByteArray ba;
-	BIO *b;
-
-	if (fp == NULL) {
-		fopen_error(fname);
-		return;
-	}
-	b = BIO_new(BIO_s_file());
-	pki_openssl_error();
-	BIO_set_fp(b,fp,BIO_NOCLOSE);
+	QByteArray ba = file.read(4096*1024);
 	try {
-		fromPEM_BIO(b, fname);
-		BIO_free(b);
-		setIntName(rmslashdot(fname));
-		return;
+		fromPEM_BIO(BioByteArray(ba).ro(), file.fileName());
 	} catch (errorEx &err) {
-		BIO_free(b);
-		fseek(fp, 0, SEEK_SET);
+		fromExportData(ba);
 	}
-	while (1) {
-		size_t ret = fread(buf, 1, sizeof buf, fp);
-		ba.append(buf, ret);
-		if (ret < sizeof buf)
-			break;
-	}
-	int err = ferror(fp);
-	fclose(fp);
-	if (err) {
-		my_error(tr("Template file content error (too small): %1").
-			arg(fname));
-	}
-	fromExportData(ba);
-	setIntName(rmslashdot(fname));
+	pki_openssl_error();
 }
 
-void pki_temp::fload(QString fname)
+void pki_temp::fload(const QString &fname)
 {
 	try {
-		try_fload(fname, "rb");
+		XFile file(fname);
+		file.open_read();
+		try_fload(file);
 	} catch (errorEx &err) {
-#if defined(_WIN32)
+#if defined(Q_OS_WIN32)
 		/* Try again in ascii mode on Windows
 		 * to support pre 1.1.0 template exports */
-		try_fload(fname, "r");
+		XFile file(fname);
+		file.open(QIODevice::ReadOnly | QIODevice::QIODevice::Text);
+		try_fload(file);
 #else
 		throw err;
 #endif
 	}
 }
 
-void pki_temp::fromPEM_BIO(BIO *bio, QString name)
+void pki_temp::fromPEM_BIO(BIO *bio, const QString &name)
 {
 	QByteArray ba;
 	QString msg;
@@ -513,5 +496,6 @@ bool pki_temp::compare(const pki_base *) const
 
 QVariant pki_temp::getIcon(const dbheader *hd) const
 {
-	return hd->id == HD_internal_name ? QVariant(*icon) : QVariant();
+	return hd->id == HD_internal_name ?
+			QVariant(QPixmap(":templateIco")) : QVariant();
 }

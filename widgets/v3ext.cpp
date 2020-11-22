@@ -14,9 +14,12 @@
 #include <QStringList>
 #include <QMessageBox>
 #include <QValidator>
-#include "MainWindow.h"
+#include "XcaWarning.h"
 #include "lib/exception.h"
 #include "lib/ipvalidator.h"
+#include "lib/x509v3ext.h"
+
+#include <openssl/err.h>
 
 
 v3ext::v3ext(QWidget *parent)
@@ -78,7 +81,7 @@ void v3ext::setupLineEdit(const QString &s, QLineEdit *l)
 		v = new QRegExpValidator(rx, this);
 	} else if (s == "URI") {
 		tt = tr("A uniform resource indicator");
-		QRegExp rx("[a-z]+://.*");
+		QRegExp rx("[a-z][a-z0-9\\.\\+\\-]*://.*");
                 v = new QRegExpValidator(rx, this);
 	} else if (s == "DNS") {
 		if (nid == NID_subject_alt_name)

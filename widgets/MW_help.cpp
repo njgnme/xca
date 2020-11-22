@@ -1,6 +1,6 @@
 /* vi: set sw=4 ts=4:
  *
- * Copyright (C) 2001 - 2017 Christian Hohnstaedt.
+ * Copyright (C) 2001 - 2020 Christian Hohnstaedt.
  *
  * All rights reserved.
  */
@@ -19,35 +19,43 @@
 #include "lib/func.h"
 #include "lib/entropy.h"
 
-void MainWindow::cmd_version()
+const QList<QStringList> MainWindow::getTranslators() const
 {
-	fprintf(stderr, XCA_TITLE " Version %s\n", version_str(false));
-	exitApp = 1;
-}
-
-void MainWindow::cmd_help(const char* msg)
-{
-	fprintf(stderr, XCA_TITLE " Version %s\n"
-		"\n"
-		" -v show version information and exit\n"
-		" -h shows this help screen and exit\n"
-		" -d expect the following argument to be the database name to use\n"
-		" -i expect the following argument to be the index file to generate\n"
-		" -I expect the following argument to be the base name the index file hierarchy to generate\n"
-		" -x Exit after processing all commandline options\n\n", version_str(false));
-
-	if (msg) {
-		fprintf(stderr, "Cmdline Error: %s\n", msg);
-	}
-	exitApp = 1;
-}
+	return QList<QStringList> {
+	QStringList{ "", tr("System") },
+	QStringList{ "zh_CN", tr("Chinese"),
+		"Xczh", "xczh.me", "foxmail.com" },
+	QStringList{ "hr", tr("Croatian"),
+		"Nevenko Bartolincic", "nevenko.bartolincic", "gmail.com" },
+	QStringList{ "nl", tr("Dutch"), "Guido Pennings" },
+	QStringList{ "en", tr("English") },
+	QStringList{ "fr", tr("French"),
+		"Patrick Monnerat", "patrick", "monnerat.net" },
+	QStringList{ "de", tr("German"),
+		"Christian Hohnstädt", "christian", "hohnstaedt.de" },
+	QStringList{ "it", tr("Italian"),
+		"Paolo Basenghi", "paul69", "libero.it" },
+	QStringList{ "ja", tr("Japanese"),
+		"ぶらすず", "burasuzu", "gmail.com" },
+	QStringList{ "pl", tr("Polish"),
+		"Jacek Tyborowski", "jacek", "tyborowski.pl" },
+	QStringList{ "pt_BR", tr("Portuguese in Brazil"),
+		"Vinicius Ocker", "viniciusockerfagundes", "yandex.com" },
+	QStringList{ "ru", tr("Russian") },
+	QStringList{ "sk", tr("Slovak"),
+		"Slavko", "linux", "slavino.sk" },
+	QStringList{ "es", tr("Spanish"),
+		"Miguel Romera", "mrmsoftdonation", "gmail.com" },
+	QStringList{ "tr", tr("Turkish") },
+	};
+};
 
 void MainWindow::about()
 {
 	QTextEdit *textbox = new QTextEdit(NULL);
 	XcaDialog *about = new XcaDialog(this, x509, textbox,
 					QString(), QString());
-	about->aboutDialog(scardImg);
+	about->aboutDialog(QPixmap(":scardImg"));
 	QString openssl, qt, cont, version, brainpool;
 #ifndef OPENSSL_NO_EC
 #ifdef NID_brainpoolP160r1
@@ -82,12 +90,29 @@ void MainWindow::about()
 	} else {
 		version = QString("%1<br>QT version: %2").arg(openssl).arg(qt);
 	}
+	QStringList rows;
+	foreach(QStringList sl, getTranslators()) {
+		QString email;
+		QStringList tag { "<td>", "</td>" };
+		if (sl.size() < 3)
+			continue;
+		if (sl.size() > 4)
+			email = QString("<%1@%2>").arg(sl[3]).arg(sl[4]);
+		QString lang(QLocale::languageToString(QLocale(sl[0]).language()));
+		QStringList row {
+			QString("<b>%1</b>").arg(lang),
+			htmlEscape(sl[2]),
+			htmlEscape(email),
+		};
+		rows << tag[0] + row.join(tag[0] + tag[1]) + tag[1];
+	}
+
 	Entropy::seed_rng();
 	cont = QString(
-	"<p><h3><center><u>XCA</u></center></h3>"
-	"<p>Copyright 2001 - 2018 by Christian Hohnst&auml;dt\n"
+	"<p><h3><center><u>XCA%8</u></center></h3>"
+	"<p>Copyright 2001 - 2020 by Christian Hohnstädt\n"
 	"<p>Version: %4<p>%1<p>%2" /* commithash, Brainpool, OpenSSL & Qt Version */
-	"<p>http://hohnstaedt.de/xca"
+	"<p><a href=\"https://hohnstaedt.de/xca\">https://hohnstaedt.de/xca</a>"
 	"<p>Entropy strength: %3"
 	"<p><table border=\"0\">"
 	"<tr><td>Installation path:</td><td>%5</td></tr>"
@@ -100,15 +125,15 @@ void MainWindow::about()
 	"<tr><th align=left>Kerstin Steinhauff</th><td><u>&lt;tine@kerstine.de&gt;</td></u></tr>"
 	"<tr><td></td><td>Arts and Graphics</td></tr>"
 	"</table><hr><center><u><b>Maintained Translations</b></u></center>"
-	"<p><table>"
-	"<tr><td><b>German</b></td><td>Christian Hohnst&auml;dt &lt;christian@hohnstaedt.de&gt;</td></tr>"
-	"<tr><td><b>French</b></td><td>Patrick Monnerat &lt;patrick@monnerat.net&gt;</td></tr>"
-	"<tr><td><b>Croatian</b></td><td>Nevenko Bartolincic &lt;nevenko.bartolincic@gmail.com&gt;</td></tr>"
-	"<tr><td><b>Slovak</b></td><td>Slavko &lt;linux@slavino.sk&gt;</td></tr>"
-	"</table>").arg(brainpool).arg(version).arg(Entropy::strength())
-			.arg(version_str(true)).arg(getPrefix())
-			.arg(getUserSettingsDir())
-			.arg(QString(Settings["workingdir"]));
+	"<p><table><tr>%9</tr></table>").arg(brainpool)
+			.arg(version)
+			.arg(Entropy::strength())
+			.arg(version_str(true))
+			.arg(nativeSeparator(getPrefix()))
+			.arg(nativeSeparator(getUserSettingsDir()))
+			.arg(nativeSeparator(QString(Settings["workingdir"])))
+			.arg(portable_app() ? " (Portable)" : "")
+			.arg(rows.join("</tr><tr>"));
 
 	textbox->setHtml(cont);
 	textbox->setReadOnly(true);
@@ -118,7 +143,7 @@ void MainWindow::about()
 
 void MainWindow::help()
 {
-	QDialog *h = new QDialog(this, 0);
+	QDialog *h = new QDialog(this);
 	QString path, uri;
 	Ui::Help ui;
 	ui.setupUi(h);

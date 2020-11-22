@@ -11,6 +11,8 @@
 #include "MainWindow.h"
 #include "distname.h"
 #include "clicklabel.h"
+#include "XcaWarning.h"
+#include "OidResolver.h"
 #include "lib/func.h"
 #include <QLabel>
 #include <QPushButton>
@@ -91,15 +93,18 @@ void CertDetail::setX509super(pki_x509super *x)
 
 	// Comment
 	comment->setPlainText(x->getComment());
+
+	setCert(dynamic_cast<pki_x509*>(x));
+	setReq(dynamic_cast<pki_x509req*>(x));
 }
 
 void CertDetail::setCert(pki_x509 *cert)
 {
-	image->setPixmap(*MainWindow::certImg);
+	if (!cert)
+		return;
+	image->setPixmap(QPixmap(":certImg"));
 	headerLabel->setText(tr("Details of the Certificate"));
 	try {
-		setX509super(cert);
-
 		// No attributes
 		tabwidget->removeTab(3);
 
@@ -136,8 +141,8 @@ void CertDetail::setCert(pki_x509 *cert)
 		dateValid->disableToolTip();
 		if (cert->isRevoked()) {
 			x509rev rev = cert->getRevocation();
-			dateValid->setText(tr("Revoked: ") +
-			rev.getDate().toPretty());
+			dateValid->setText(tr("Revoked at %1")
+				.arg(rev.getDate().toPretty()));
 			dateValid->setRed();
 			dateValid->setToolTip(rev.getDate().toPrettyGMT());
 		} else if (!cert->checkDate()) {
@@ -163,11 +168,11 @@ void CertDetail::setCert(pki_x509 *cert)
 
 void CertDetail::setReq(pki_x509req *req)
 {
-	image->setPixmap(*MainWindow::csrImg);
+	if (!req)
+		return;
+	image->setPixmap(QPixmap(":csrImg"));
 	headerLabel->setText(tr("Details of the certificate signing request"));
 	try {
-		setX509super(req);
-
 		// No issuer
 		tabwidget->removeTab(2);
 
@@ -270,6 +275,5 @@ void CertDetail::showPubKey()
 
 CertDetail::~CertDetail()
 {
-	if (myPubKey)
-		delete myPubKey;
+	delete myPubKey;
 }

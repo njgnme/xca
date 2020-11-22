@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2014 Christian Hohnstaedt.
+ * Copyright (C) 2014 - 2020 Christian Hohnstaedt.
  *
  * All rights reserved.
  */
@@ -14,6 +14,7 @@
 
 #define CURVE_X962  1
 #define CURVE_OTHER 2
+#define CURVE_RFC5480 3
 
 class builtin_curve
 {
@@ -37,6 +38,13 @@ class builtin_curves: public QList<builtin_curve>
 {
     public:
 	builtin_curves();
+	bool containNid(int nid)
+	{
+		foreach(const builtin_curve &c, *this)
+			if (c.nid == nid)
+				return true;
+		return false;
+	}
 };
 
 #endif

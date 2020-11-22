@@ -11,6 +11,7 @@
 void Passwd::cleanse()
 {
 	memset(data(), 0, size());
+	clear();
 }
 
 Passwd::~Passwd()
@@ -21,4 +22,3 @@ unsigned char *Passwd::constUchar() const
 {
 	return (unsigned char *)(size() ? constData() : "");
 }
-

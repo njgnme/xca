@@ -1,6 +1,6 @@
 /* vi: set sw=4 ts=4:
  *
- * Copyright (C) 2001 - 2011 Christian Hohnstaedt.
+ * Copyright (C) 2001 - 2020 Christian Hohnstaedt.
  *
  * All rights reserved.
  */
@@ -14,30 +14,36 @@
 #include "pki_pkcs12.h"
 #include "pki_crl.h"
 #include "pki_temp.h"
+#include "pki_evp.h"
 #include "load_obj.h"
 #include "exception.h"
 #include "func.h"
-#include "widgets/MainWindow.h"
+#include "xfile.h"
+#include "widgets/XcaWarning.h"
 #include <QList>
 
-pki_multi::pki_multi(const QString name)
+pki_multi::pki_multi(const QString &name)
 	:pki_base(name)
 {
 	multi.clear();
+	failed_files.clear();
 }
 
 pki_multi::~pki_multi()
 {
-	pki_base *pki;
-	while ((pki = pull()))
-		delete pki;
+	foreach(pki_base *pki, multi) {
+		if (pki->getSqlItemId().toInt() == 0)
+			delete pki;
+	}
 }
 
-pki_base *pki_multi::pull()
+void pki_multi::append_item(pki_base *pki)
 {
-	if (multi.isEmpty())
-		return NULL;
-	return multi.takeFirst();
+	pki_multi *m = dynamic_cast<pki_multi*>(pki);
+	if (m)
+		multi += m;
+	else
+		multi << pki;
 }
 
 #define D5 "-----"
@@ -87,24 +93,21 @@ static pki_base *pkiByPEM(QString text, int *skip)
 	return NULL;
 }
 
-void pki_multi::fload(const QString fname)
+void pki_multi::fload(const QString &fname)
 {
-	QFile file(fname);
+	XFile file(fname);
 	QByteArray ba;
 
-	file.open(QFile::ReadOnly);
-	if (file.error()) {
-		fopen_error(fname);
-		return;
-	}
+	file.open_read();
 	ba = file.readAll();
 	fromPEMbyteArray(ba, fname);
 };
 
-void pki_multi::fromPEMbyteArray(QByteArray &ba, QString name)
+void pki_multi::fromPEMbyteArray(const QByteArray &_ba, const QString &name)
 {
 	pki_base *item = NULL;
-	int startpos;
+	int startpos, old_count = multi.size();
+	QByteArray ba = _ba;
 	for (;;) {
 		try {
 			item = pkiByPEM(QString::fromLatin1(ba), &startpos);
@@ -114,24 +117,24 @@ void pki_multi::fromPEMbyteArray(QByteArray &ba, QString name)
 			item->fromPEMbyteArray(ba, name);
 			item->pkiSource = imported;
 			openssl_error();
-			multi.append(item);
+			append_item(item);
 		} catch (errorEx &err) {
-			MainWindow::Error(err);
-			if (item)
-				delete item;
+			XCA_ERROR(err);
+			delete item;
 			item = NULL;
 		}
 		ba.remove(0, sizeof BEGIN -1);
 	}
-	if (multi.size() == 0)
+	if (multi.size() == old_count)
 		throw errorEx(tr("No known PEM encoded items found"));
 }
 
-void pki_multi::probeAnything(const QString fname)
+void pki_multi::probeAnything(const QString &fname)
 {
 	pki_base *item = NULL;
 	load_base *lb;
-	QList<load_base *> lbs;
+	QList<load_base*> lbs;
+	int old_count = multi.size();
 
 	lbs <<  new load_pem() <<
 		new load_cert() << new load_pkcs7() << new load_pkcs12() <<
@@ -142,16 +145,36 @@ void pki_multi::probeAnything(const QString fname)
 		try {
 			item = lb->loadItem(fname);
 			if (item) {
-				multi.append(item);
+				append_item(item);
 				break;
 			}
 		} catch (errorEx &err) {
-			if (err.info == E_PASSWD) {
-				MainWindow::Error(err);
+			continue;
+		} catch (enum open_result r) {
+			if (r == pw_cancel)
 				break;
-			}
 		}
 	}
-	while (!lbs.isEmpty())
-		delete lbs.takeFirst();
+	if (multi.count() == old_count && !fname.isEmpty())
+		failed_files << fname;
+
+	qDeleteAll(lbs);
+}
+
+void pki_multi::print(BioByteArray &bba, enum print_opt opt) const
+{
+	foreach(pki_base *pki, multi)
+		pki->print(bba, opt);
+}
+
+QList<pki_base *> pki_multi::pull()
+{
+	QList<pki_base*> temp = multi;
+	multi.clear();
+	return temp;
+}
+
+QList<pki_base *> pki_multi::get() const
+{
+	return multi;
 }

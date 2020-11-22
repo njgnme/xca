@@ -1,6 +1,6 @@
 /* vi: set sw=4 ts=4:
  *
- * Copyright (C) 2001 - 2011 Christian Hohnstaedt.
+ * Copyright (C) 2001 - 2020 Christian Hohnstaedt.
  *
  * All rights reserved.
  */
@@ -11,8 +11,8 @@
 #include <openssl/x509.h>
 #include <openssl/pem.h>
 #include "pki_key.h"
-#include "x509v3ext.h"
 #include "pki_x509super.h"
+#include "x509v3ext.h"
 #include "x509name.h"
 
 #define VIEW_x509req_request 7
@@ -29,19 +29,22 @@ class pki_x509req : public pki_x509super
 		X509_REQ *request;
 		bool done;
 		int sigAlg() const;
+		void collect_properties(QMap<QString, QString> &prp) const;
 
 	public:
-		extList getV3ext() const;
-		static QPixmap *icon[3];
-		pki_x509req(QString name = "");
-		void fromPEM_BIO(BIO *bio, QString name);
-		void fload(const QString fname);
-		void writeDefault(const QString fname);
+		pki_x509req(const QString &name = QString());
+		pki_x509req(const pki_x509req *req);
 		~pki_x509req();
+
+		extList getV3ext() const;
+		void fromPEM_BIO(BIO *bio, const QString &name);
+		void fload(const QString &fname);
+		void writeDefault(const QString &dirname) const;
 		void fromData(const unsigned char *p, db_header_t *head);
 		x509name getSubject() const;
-		void writeReq(const QString fname, bool pem);
+		void writeReq(XFile &file, bool pem) const;
 		void markSigned(bool signe);
+		void print(BioByteArray &b, enum print_opt opt) const;
 		X509_REQ *getReq()
 		{
 			return request;
@@ -50,7 +53,7 @@ class pki_x509req : public pki_x509super
 		QString getAttribute(int nid) const;
 		int issuedCerts() const;
 
-		int verify() const;
+		bool verify() const;
 		pki_key *getPubKey() const;
 		void createReq(pki_key *key, const x509name &dn,
 				const EVP_MD *md, extList el);
@@ -72,7 +75,7 @@ class pki_x509req : public pki_x509super
 		virtual QString getMsg(msg_type msg) const;
 		void d2i(QByteArray &ba);
 		QByteArray i2d() const;
-		BIO *pem(BIO *, int);
+		bool pem(BioByteArray &, int);
 		bool visible() const;
 		QSqlError insertSqlData();
 		QSqlError deleteSqlData();

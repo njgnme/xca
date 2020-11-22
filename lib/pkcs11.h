@@ -17,18 +17,23 @@
 #include <ltdl.h>
 
 #include "pk11_attribute.h"
+#include "func.h"
 
-#define WAITCURSOR_START do { QApplication::setOverrideCursor(QCursor(Qt::WaitCursor)); ign_openssl_error(); } while(0);
-#define WAITCURSOR_END do { QApplication::restoreOverrideCursor(); ign_openssl_error(); } while(0);
+void waitcursor(int start, int line);
+#define WAITCURSOR_START waitcursor(1, __LINE__);
+#define WAITCURSOR_END waitcursor(0, __LINE__);
 
+extern char segv_data[1024];
 #define CALL_P11_C(l, func, ...) do { \
 	snprintf(segv_data, sizeof segv_data, "Crashed in %s in %s from %s:%d\n" \
 		"This looks like a bug in the PKC#11 library and not in XCA\n", \
 		#func, CCHAR((l)->filename()), __func__, __LINE__); \
-	QApplication::setOverrideCursor(QCursor(Qt::WaitCursor)); \
+	if (IS_GUI_APP) \
+		QApplication::setOverrideCursor(QCursor(Qt::WaitCursor)); \
 	rv = l->ptr()->func(__VA_ARGS__); \
 	segv_data[0] = 0; \
-	QApplication::restoreOverrideCursor(); \
+	if (IS_GUI_APP) \
+		QApplication::restoreOverrideCursor(); \
 	ign_openssl_error(); \
 } while(0);
 
@@ -38,6 +43,10 @@ class tkInfo
 private:
 	CK_TOKEN_INFO token_info;
 public:
+	tkInfo()
+	{
+		memset(&token_info, 0, sizeof token_info);
+	}
 	tkInfo(const CK_TOKEN_INFO *ti)
 	{
 		set(ti);
@@ -102,60 +111,39 @@ class pkcs11
 	friend class pk11_attr_data;
 
 	private:
-		static pkcs11_lib_list libs;
 		slotid p11slot;
 		CK_SESSION_HANDLE session;
 		CK_OBJECT_HANDLE p11obj;
 
 	public:
+		static pkcs11_lib_list libraries;
 		pkcs11();
 		~pkcs11();
 
-		static bool loaded() {
-			return libs.count() != 0;
-		}
-		static pkcs11_lib *load_lib(QString fname, bool silent);
-		static pkcs11_lib *get_lib(QString fname)
-		{
-			return libs.get_lib(fname);
-		}
-		static bool remove_lib(QString fname)
-		{
-			return libs.remove_lib(fname);
-		}
-		static void remove_libs()
-		{
-			while (!libs.isEmpty())
-				delete libs.takeFirst();
-		}
-		static void load_libs(QString list, bool silent);
-		static pkcs11_lib_list get_libs()
-		{
-			return libs;
-		}
-		tkInfo tokenInfo(slotid slot);
+		CK_RV tokenInfo(const slotid &slot, tkInfo *tkinfo);
+		tkInfo tokenInfo(const slotid &slot);
 		tkInfo tokenInfo()
 		{
 			return tokenInfo(p11slot);
 		}
-		QString driverInfo(slotid slot)
+		QString driverInfo(const slotid &slot) const
 		{
 			return slot.lib->driverInfo();
 		}
-		slotidList getSlotList()
+		static slotidList getSlotList()
 		{
-			return libs.getSlotList();
+			return libraries.getSlotList();
 		}
 
 		bool selectToken(slotid *slot, QWidget *w);
-		void changePin(slotid slot, bool so);
-		void initPin(slotid slot);
-		void initToken(slotid slot, unsigned char *pin,
+		void changePin(const slotid &slot, bool so);
+		void initPin(const slotid &slot);
+		void initToken(const slotid &slot, unsigned char *pin,
 			int pinlen, QString label);
-		QList<CK_MECHANISM_TYPE> mechanismList(slotid slot);
-		void mechanismInfo(slotid slot, CK_MECHANISM_TYPE m,
+		QList<CK_MECHANISM_TYPE> mechanismList(const slotid &slot);
+		void mechanismInfo(const slotid &slot, CK_MECHANISM_TYPE m,
 			CK_MECHANISM_INFO *info);
-		void startSession(slotid slot, bool rw = false);
+		void startSession(const slotid &slot, bool rw = false);
 
 		/* Session based functions */
 		void loadAttribute(pk11_attribute &attribute,

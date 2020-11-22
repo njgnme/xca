@@ -10,28 +10,21 @@
 #include "pki_evp.h"
 
 #include "pki_scard.h"
+#include "main.h"
 #include <QDialog>
 #include <QLabel>
 #include <QPushButton>
-
-#include <QMessageBox>
-#include <QProgressBar>
-#include <QStatusBar>
-#include <QContextMenuEvent>
 
 #include "exception.h"
 #include "ui_NewKey.h"
 #include "pkcs11.h"
 
+#include "widgets/XcaWarning.h"
 #include "widgets/PwDialog.h"
 #include "widgets/ExportDialog.h"
-#include "widgets/KeyDetail.h"
-#include "widgets/NewKey.h"
 
-db_key::db_key(MainWindow *mw)
-	:db_base(mw)
+db_key::db_key() : db_base("keys")
 {
-	class_name = "keys";
 	sqlHashTable = "public_keys";
 	pkitype << asym_key << smartCard;
 	updateHeaders();
@@ -43,20 +36,20 @@ void db_key::loadContainer()
 	XSqlQuery q;
 
 	db_base::loadContainer();
-	FOR_ALL_pki(key, pki_key)
+	foreach(pki_key *key, Store.getAll<pki_key>())
 		key->setUcount(0);
 
 	SQL_PREPARE(q, "SELECT pkey, COUNT(*) FROM x509super WHERE pkey IS NOT NULL GROUP by pkey");
 	q.exec();
 	while (q.next()) {
-		pki_key *key = lookupPki<pki_key>(q.value(0));
+		pki_key *key = Store.lookupPki<pki_key>(q.value(0));
 		if (!key) {
 			qDebug() << "Unknown key" << q.value(0).toULongLong();
 			continue;
 		}
 		key->setUcount(q.value(1).toInt());
 	}
-	MainWindow::dbSqlError(q.lastError());
+	XCA_SQLERROR(q.lastError());
 }
 
 dbheaderList db_key::getHeaders()
@@ -81,12 +74,13 @@ pki_base *db_key::newPKI(enum pki_type type)
 
 QList<pki_key *> db_key::getAllKeys()
 {
-	return sqlSELECTpki<pki_key>("SELECT item from public_keys");
+	return Store.sqlSELECTpki<pki_key>("SELECT item from public_keys");
 }
 
 QList<pki_key *> db_key::getUnusedKeys()
 {
-	return sqlSELECTpki<pki_key>("SELECT public_keys.item FROM public_keys "
+	return Store.sqlSELECTpki<pki_key>(
+		"SELECT public_keys.item FROM public_keys "
 		"LEFT OUTER JOIN x509super ON x509super.pkey= public_keys.item "
 		"WHERE x509super.item IS NULL");
 }
@@ -96,10 +90,7 @@ void db_key::remFromCont(const QModelIndex &idx)
 	db_base::remFromCont(idx);
 	XSqlQuery q;
 
-	/* "pkey" column in "x509super" table already updated
-	 * in deleteSql()
-	 */
-	QList<pki_x509super*> items = sqlSELECTpki<pki_x509super>(
+	QList<pki_x509super*> items = Store.sqlSELECTpki<pki_x509super>(
 		"SELECT item FROM x509super WHERE pkey is NULL");
 	foreach(pki_x509super *x509s, items) {
 		x509s->setRefKey(NULL);
@@ -113,7 +104,7 @@ void db_key::inToCont(pki_base *pki)
 	db_base::inToCont(pki);
 	pki_key *key = static_cast<pki_key*>(pki);
 	unsigned hash = key->hash();
-	QList<pki_x509super*> items = sqlSELECTpki<pki_x509super>(
+	QList<pki_x509super*> items = Store.sqlSELECTpki<pki_x509super>(
 		"SELECT item FROM x509super WHERE pkey IS NULL AND key_hash=?",
 		QList<QVariant>() << QVariant(hash));
 	XSqlQuery q;
@@ -127,21 +118,25 @@ void db_key::inToCont(pki_base *pki)
 		q.bindValue(1, x509s->getSqlItemId());
 		AffectedItems(x509s->getSqlItemId());
 		q.exec();
-		mainwin->dbSqlError(q.lastError());
+		XCA_SQLERROR(q.lastError());
 	}
 }
 
 pki_base* db_key::insert(pki_base *item)
 {
-	pki_key *lkey = static_cast<pki_key *>(item);
+	pki_key *lkey = dynamic_cast<pki_key *>(item);
 	pki_key *oldkey;
+	pki_evp *evp = dynamic_cast<pki_evp*>(lkey);
+
+	if (evp)
+		evp->setOwnPass(pki_evp::ptCommon);
 
 	oldkey = static_cast<pki_key *>(getByReference(lkey));
 	if (oldkey != NULL) {
 		if ((oldkey->isPrivKey() && lkey->isPrivKey()) || lkey->isPubKey()){
 			XCA_INFO(
 			tr("The key is already in the database as:\n'%1'\nand is not going to be imported").arg(oldkey->getIntName()));
-			delete(lkey);
+			delete lkey;
 			return NULL;
 		} else {
 			XCA_INFO(
@@ -151,7 +146,7 @@ pki_base* db_key::insert(pki_base *item)
 				.arg(oldkey->getInsertionDate().toPretty())
 				.arg(lkey->getIntName()));
 			lkey->setIntName(oldkey->getIntName());
-			deletePKI(index(oldkey->row(), 0, QModelIndex()));
+			deletePKI(index(oldkey));
 		}
 	}
 	insertPKI(lkey);
@@ -159,70 +154,38 @@ pki_base* db_key::insert(pki_base *item)
 	return lkey;
 }
 
-void db_key::newItem() {
-	newItem("");
-}
-
-void db_key::newItem(QString name)
+pki_key *db_key::newKey(const keyjob &task, const QString &name)
 {
-	NewKey *dlg = new NewKey(qApp->activeWindow(), name);
-	QProgressBar *bar;
-	QStatusBar *status = mainwin->statusBar();
-	pki_evp *nkey = NULL;
-	pki_scard *cardkey = NULL;
 	pki_key *key = NULL;
 
-	if (!dlg->exec()) {
-		delete dlg;
-		return;
-	}
-	int ksize = dlg->getKeysize();
-#ifndef OPENSSL_NO_EC
-	if (dlg->getKeytype() != EVP_PKEY_EC)
-#endif
-	{
-		if (ksize < 32) {
+	if (!task.isEC()) {
+		if (task.size < 32) {
 			XCA_WARN(tr("Key size too small !"));
-			delete dlg;
-			return;
+			return NULL;
 		}
-		if (ksize < 1024 || ksize > 8192)
-			if (!XCA_YESNO(tr("You are sure to create a key of the size: %1 ?").arg(ksize))) {
-				delete dlg;
-				return;
+		if (task.size < 1024 || task.size > 8192)
+			if (!XCA_YESNO(tr("You are sure to create a key of the size: %1 ?").arg(task.size))) {
+				return NULL;
 			}
 	}
-	mainwin->repaint();
-	bar = new QProgressBar();
-	status->addPermanentWidget(bar, 1);
 	try {
-		if (dlg->isToken()) {
-			key = cardkey = new pki_scard(dlg->keyDesc->text());
-			cardkey->generateKey_card(dlg->getKeytype(),
-				dlg->getKeyCardSlot(), ksize,
-				dlg->getKeyCurve_nid(), bar);
+		if (task.isToken()) {
+			key = new pki_scard(name);
 		} else {
-			key = nkey = new pki_evp(dlg->keyDesc->text());
-			nkey->generate(ksize, dlg->getKeytype(), bar,
-				dlg->getKeyCurve_nid());
+			key = new pki_evp(name);
 		}
+		key->generate(task);
 		key->pkiSource = generated;
-		key = (pki_key*)insert(key);
+		key = dynamic_cast<pki_key*>(insert(key));
 		emit keyDone(key);
 		createSuccess(key);
 
 	} catch (errorEx &err) {
 		delete key;
-		mainwin->Error(err);
+		key = NULL;
+		XCA_ERROR(err);
 	}
-	if (dlg->rememberDefault->isChecked()) {
-		QString def = dlg->getAsString();
-		if (dlg->setDefault(def) == 0)
-			Settings["defaultkey"] = def;
-	}
-	status->removeWidget(bar);
-	delete bar;
-	delete dlg;
+	return key;
 }
 
 void db_key::load(void)
@@ -231,47 +194,26 @@ void db_key::load(void)
 	load_default(l);
 }
 
-void db_key::showPki(pki_base *pki)
-{
-	pki_key *key = dynamic_cast<pki_key *>(pki);
-	if (!key)
-		return;
-	KeyDetail *dlg = new KeyDetail(mainwin);
-	if (!dlg)
-		return;
-	dlg->setKey(key);
-
-	if (dlg->exec()) {
-		QString newname = dlg->keyDesc->text();
-		QString newcomment = dlg->comment->toPlainText();
-		if (newname != pki->getIntName() ||
-		    newcomment != pki->getComment())
-		{
-			updateItem(pki, newname, newcomment);
-		}
-	}
-	delete dlg;
-}
 exportType::etype db_key::clipboardFormat(QModelIndexList indexes) const
 {
 	QList<exportType> types;
 	bool allPriv = true;
-	bool allRSADSA = true;
+	bool ssh2compatible = true;
 
 	foreach(QModelIndex idx, indexes) {
-		pki_key *key = static_cast<pki_key*>
-			(idx.internalPointer());
+		pki_key *key = fromIndex<pki_key>(idx);
+		if (!key)
+			continue;
 		if (key->isPubKey() || key->isToken())
 			allPriv = false;
-		if (key->getKeyType() != EVP_PKEY_RSA &&
-		    key->getKeyType() != EVP_PKEY_DSA)
-			allRSADSA = false;
+		if (!key->SSH2_compatible())
+			ssh2compatible = false;
 	}
-	if (!allPriv && !allRSADSA)
+	if (!allPriv && !ssh2compatible)
 		return exportType::PEM_key;
 
 	types << exportType(exportType::PEM_key, "pem", tr("PEM public"));
-	if (allRSADSA)
+	if (ssh2compatible)
 		types << exportType(exportType::SSH2_public,
 			"pub", tr("SSH2 public"));
 	if (allPriv)
@@ -280,9 +222,9 @@ exportType::etype db_key::clipboardFormat(QModelIndexList indexes) const
 		      << exportType(exportType::PKCS8, "pk8",
 			"PKCS#8");
 
-	ExportDialog *dlg = new ExportDialog(mainwin,
+	ExportDialog *dlg = new ExportDialog(NULL,
 		tr("Export keys to Clipboard"), QString(), NULL,
-		MainWindow::keyImg, types);
+		QPixmap(":keyImg"), types);
 
 	dlg->filename->setText(tr("Clipboard"));
 	dlg->filename->setEnabled(false);
@@ -299,18 +241,25 @@ void db_key::store(QModelIndex index)
 	const EVP_CIPHER *algo = NULL, *encrypt = EVP_aes_256_cbc();
 	QString title = tr("Export public key [%1]");
 	QList<exportType> types;
+	bool pvk = false;
 
-	if (!index.isValid())
+	pki_key *key = fromIndex<pki_key>(index);
+	pki_evp *privkey = dynamic_cast<pki_evp *>(key);
+
+	if (!index.isValid() || !key)
 		return;
 
-	pki_key *key =static_cast<pki_evp*>(index.internalPointer());
-	pki_evp *privkey = (pki_evp *)key;
+#if OPENSSL_VERSION_NUMBER >= 0x10000000L
+	int keytype = key->getKeyType();
+	if (keytype == EVP_PKEY_RSA || keytype == EVP_PKEY_DSA)
+		pvk = true;
+#endif
 
 	types <<
 	exportType(exportType::PEM_key, "pem", tr("PEM public")) <<
 	exportType(exportType::DER_key, "der", tr("DER public"));
-	if (key->getKeyType() == EVP_PKEY_RSA ||
-            key->getKeyType() == EVP_PKEY_DSA)
+
+	if (key->SSH2_compatible())
 		types << exportType(exportType::SSH2_public,
 					"pub", tr("SSH2 public"));
 	if (!key->isPubKey() && !key->isToken()) {
@@ -320,8 +269,15 @@ void db_key::store(QModelIndex index)
 			tr("DER private")) <<
 		exportType(exportType::PEM_private_encrypt, "pem",
 			tr("PEM encryped")) <<
-		exportType(exportType::PKCS8, "pk8",
-			"PKCS#8");
+		exportType(exportType::PKCS8, "pk8", "PKCS#8");
+
+		if (pvk) {
+			types <<
+			exportType(exportType::PVK_private, "pvk",
+				tr("PVK private")) <<
+			exportType(exportType::PVK_encrypt, "pvk",
+				tr("PVK encrypted"));
+		}
 		usual <<
 		exportType(exportType::PEM_private, "pem",
 			tr("PEM private")) <<
@@ -330,65 +286,82 @@ void db_key::store(QModelIndex index)
 		title = tr("Export private key [%1]");
 		types = usual << exportType() << types;
 	}
-	ExportDialog *dlg = new ExportDialog(mainwin,
+	ExportDialog *dlg = new ExportDialog(NULL,
 		title.arg(key->getTypeString()),
 		tr("Private Keys ( *.pem *.der *.pk8 );; "
 		   "SSH Public Keys ( *.pub )"), key,
-		key->isToken() ? MainWindow::scardImg : MainWindow::keyImg,
+		QPixmap(key->isToken() ? ":scardImg" : ":keyImg"),
 		types);
 
 	if (!dlg->exec()) {
 		delete dlg;
 		return;
 	}
-	QString fname = dlg->filename->text();
 	try {
 		exportType::etype type = dlg->type();
+		pki_base::pem_comment = dlg->pemComment->isChecked();
+		XFile file(dlg->filename->text());
+
 		switch (type) {
 		case exportType::DER_key:
-			key->writePublic(fname, false);
+		case exportType::PEM_key:
+		case exportType::SSH2_public:
+			file.open_write();
+			break;
+		default:
+			file.open_key();
+		}
+		switch (type) {
+		case exportType::DER_key:
+			key->writePublic(file, false);
 			break;
 		case exportType::DER_private:
-			privkey->writeKey(fname, NULL, NULL, false);
+			privkey->writeKey(file, NULL, NULL, false);
 			break;
 		case exportType::PEM_key:
-			key->writePublic(fname, true);
+			key->writePublic(file, true);
 			break;
 		case exportType::PEM_private_encrypt:
 			algo = encrypt;
 			/* fallthrough */
 		case exportType::PEM_private:
-			privkey->writeKey(fname, algo,
+			privkey->writeKey(file, algo,
 				PwDialog::pwCallback, true);
 			break;
 		case exportType::PKCS8_encrypt:
 			algo = encrypt;
 			/* fallthrough */
 		case exportType::PKCS8:
-			privkey->writePKCS8(fname, algo,
+			privkey->writePKCS8(file, algo,
 				PwDialog::pwCallback, true);
 			break;
 		case exportType::SSH2_public:
-			key->writeSSH2public(fname);
+			key->writeSSH2public(file);
+			break;
+		case exportType::PVK_private:
+			privkey->writePVKprivate(file, NULL);
+			break;
+		case exportType::PVK_encrypt:
+			privkey->writePVKprivate(file, PwDialog::pwCallback);
 			break;
 		default:
-			exit(1);
+			throw errorEx(tr("Internal error"));
 		}
 	}
 	catch (errorEx &err) {
-		mainwin->Error(err);
+		XCA_ERROR(err);
 	}
+	pki_base::pem_comment = false;
 	delete dlg;
 }
 
 void db_key::setOwnPass(QModelIndex idx, enum pki_key::passType x)
 {
-	pki_evp *targetKey;
+	pki_evp *targetKey = fromIndex<pki_evp>(idx);
 	enum pki_key::passType old_type;
 
-	if (!idx.isValid())
+	if (!idx.isValid() || !targetKey)
 		return;
-	targetKey = static_cast<pki_evp*>(idx.internalPointer());
 	if (targetKey->isToken()) {
 		throw errorEx(tr("Tried to change password of a token"));
 	}

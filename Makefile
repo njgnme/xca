@@ -28,15 +28,19 @@ INSTTARGET=$(patsubst %, install.%, $(INSTDIR))
 APPTARGET=$(patsubst %, app.%, $(INSTDIR))
 
 DMGSTAGE=$(BUILD)/xca-$(VERSION)
-MACTARGET=$(DMGSTAGE)-${EXTRA_VERSION}
+MACTARGET=$(DMGSTAGE)${EXTRA_VERSION}
 APPDIR=$(DMGSTAGE)/xca.app/Contents
-OSSLSIGN_OPT=sign -pkcs12 "$(HOME)"/Christian_Hohnstaedt.p12 -askpass \
+OSSLSIGN=PKCS11SPY=/opt/SimpleSign/libcrypto3PKCS.so /usr/local/bin/osslsigncode
+
+OSSLSIGN_OPT=sign -askpass -certs ~/osdch.crt -askpass \
+	-key "pkcs11:object=Open%20Source%20Developer%2C%20Christian%20Hohnstaedt" \
+	-pkcs11engine /usr/lib/x86_64-linux-gnu/engines-1.1/libpkcs11.so \
+	-pkcs11module /usr/lib/x86_64-linux-gnu/pkcs11-spy.so \
 	-n "XCA $(VERSION)" -i https://hohnstaedt.de/xca \
 	-t http://timestamp.comodoca.com -h sha2
 
 ifeq ($(SUFFIX), .exe)
-all: setup$(SUFFIX)
-export CFLAGS_XCA_DB_STAT=-mconsole
+all: xca-portable.zip msi-installer-dir.zip
 else
 ifneq ($(MACDEPLOYQT),)
 all: $(MACTARGET).dmg
@@ -89,15 +93,15 @@ $(APPTARGET): app.%: %/.build-stamp
 		VPATH=$(TOPDIR)/$* APPDIR=$(APPDIR) app
 
 clean:
-	find lib widgets img misc  -name "*.o" \
+	find lib widgets img misc -name "*.o" \
 				-o -name ".build-stamp" \
 				-o -name ".depend" \
 				-o -name "moc_*.cpp" | xargs rm -f
 	rm -f ui/ui_*.h lang/xca_*.qm doc/*.html doc/xca.1.gz img/imgres.cpp
 	rm -f lang/*.xml lang/.build-stamp misc/dn.txt misc/eku.txt
-	rm -f commithash.h misc/oids.txt
-	rm -f xca$(SUFFIX) setup_xca*.exe *.dmg
-	rm -rf xca-$(VERSION)*
+	rm -f commithash.h misc/oids.txt misc/variables.wxi
+	rm -f xca$(SUFFIX) *.dmg xca-portable*.zip msi-installer-dir*.zip xca*.msi
+	rm -rf xca-$(VERSION)* msi-installer-dir-$(VERSION)* xca-portable-$(VERSION)*
 
 distclean: clean
 	rm -f local.h Local.mak config.log config.status misc/Info.plist
@@ -122,30 +126,46 @@ snapshot:
 		gzip -9 > xca-$${HASH}.tar.gz
 
 install: xca$(SUFFIX) $(INSTTARGET)
-	install -m 755 -d $(destdir)$(bindir)
-	install -m 755 xca $(destdir)$(bindir)
-	$(STRIP) $(destdir)$(bindir)/xca
+	install -m 755 -d $(DESTDIR)$(bindir)
+	install -m 755 xca $(DESTDIR)$(bindir)
+	$(STRIP) $(DESTDIR)$(bindir)/xca
 
-xca-8859-1.nsi: misc/xca.nsi
-	iconv -f utf8 -t iso-8859-15 -o "$@" "$<"
+xca$(SUFFIX).signed: xca$(SUFFIX)
 
-setup.exe: setup_xca-$(VERSION).exe
-setup_xca-$(VERSION).exe: xca$(SUFFIX) do.doc do.lang do.misc
-setup_xca-$(VERSION).exe: xca-8859-1.nsi
-	for binary in xca$(SUFFIX); do \
-	  $(STRIP) xca$(SUFFIX); \
-	  if test -n "$(OSSLSIGN)"; then \
-	    $(OSSLSIGN) $(OSSLSIGN_OPT) -in $${binary} -out $${binary}.signed && \
-		mv $${binary}.signed $${binary}; \
-	  fi; \
-	done
-	$(MAKENSIS) -DINSTALLDIR=$(INSTALL_DIR) -DQTDIR=$(QTDIR) \
-		-DVERSION=$(VERSION) -DBDIR=$(BDIR) -DTOPDIR=$(TOPDIR)\
-		-NOCD -V2 -DEXTRA_VERSION=${EXTRA_VERSION} $<
+%.signed: %
+	$(STRIP) $< || :
 	if test -n "$(OSSLSIGN)"; then \
-	  $(OSSLSIGN) $(OSSLSIGN_OPT) -in $@ -out setup.tmp && mv setup.tmp $@; \
+	  $(OSSLSIGN) $(OSSLSIGN_OPT) -in "$<" -out "$@" 2>/dev/null; \
+	else \
+	  mv "$<" "$@"; \
 	fi
 
+msi-installer-dir-$(VERSION): misc/xca.wxs misc/xca.bat misc/variables.wxi img/banner.bmp img/dialog.bmp img/key.ico misc/copyright.rtf
+	rm -f $@/* && mkdir -p $@ && cp -ra $^ $@
+
+xca-portable-$(VERSION): xca$(SUFFIX).signed do.doc do.lang do.misc
+	rm -rf $@
+	mkdir -p $@/sqldrivers $@/platforms $@/html $@/i18n $@/styles
+	cp xca$(SUFFIX).signed $@/xca$(SUFFIX)
+	cp $(patsubst %,misc/%.txt, dn eku oids) \
+	   $(patsubst %,"$(QTDIR)/bin/%.dll", Qt5Gui Qt5Core Qt5Widgets \
+		Qt5Sql libwinpthread-1 libstdc++-6 libgcc_s_seh-1) \
+	   "$(INSTALL_DIR)/bin/libltdl-7.dll" \
+	   "$(INSTALL_DIR)/bin/libcrypto-1_1-x64.dll" \
+	   "$(TOPDIR)"/misc/*.xca "${TOPDIR}/../sql/"*.dll $@
+	cp doc/*.html $@/html
+	cp $(patsubst %,"$(QTDIR)/translations/qt_%.qm", de es pl pt ru fr sk it ja) \
+		lang/*.qm $@/i18n
+	sed 's/$$/\r/' < "$(TOPDIR)"/COPYRIGHT > $@/copyright.txt
+	cp "$(QTDIR)/plugins/platforms/qwindows.dll" $@/platforms
+	cp $(patsubst %,"$(QTDIR)/plugins/sqldrivers/%.dll", qsqlite qsqlmysql qsqlpsql qsqlodbc) $@/sqldrivers
+	cp -a "$(QTDIR)/plugins/styles/qwindowsvistastyle.dll" "$@/styles"
+
+
+xca-portable.zip: xca-portable-$(VERSION).zip
+msi-installer-dir.zip: msi-installer-dir-$(VERSION).zip
+%-$(VERSION).zip: %-$(VERSION)
+	zip -r $@ $^
 
 $(DMGSTAGE): xca$(SUFFIX)
 	rm -rf $(DMGSTAGE)
@@ -160,21 +180,24 @@ $(DMGSTAGE): xca$(SUFFIX)
 	cp -r $(DMGSTAGE)/xca.app/Contents/Resources/*.html $(DMGSTAGE)/manual
 	ln -s xca.html $(DMGSTAGE)/manual/index.html
 	$(MACDEPLOYQT) $(DMGSTAGE)/xca.app
-	-codesign --force --deep --signature-size=96000 -s "Christian Hohnstaedt" $(DMGSTAGE)/xca.app --timestamp
 
 xca.dmg: $(MACTARGET).dmg
 
 xca.app: $(DMGSTAGE)
 
 $(MACTARGET).dmg: $(DMGSTAGE)
-	hdiutil create -ov -fs HFS+ -volname "$(TARGET)" -srcfolder "$<" "$@"
+	# Check for "Users" or "chris" in the resulting DMG image
+	rpath="`cd $(DMGSTAGE) && otool -l xca.app/Contents/MacOS/xca | grep -e "chris\|Users" ||:`" && \
+	if test -n "$$rpath"; then echo "  ERROR $$rpath"; false; fi
+	-codesign --force --deep --signature-size=96000 -s "Christian Hohnstaedt" $(DMGSTAGE)/xca.app --timestamp
+	hdiutil create -ov -fs HFS+ -volname "xca-$(VERSION)" -srcfolder "$<" "$@"
 
 trans:
 	$(MAKE) -C lang po2ts
 	lupdate -locations relative $(TOPDIR)/xca.pro
 	$(MAKE) -C lang xca.pot
 
-.PHONY: $(SUBDIRS) $(INSTDIR) xca.app setup.exe doc lang macdeployqt/macdeployqt $(DMGSTAGE) commithash.h
+.PHONY: $(SUBDIRS) $(INSTDIR) xca.app doc lang macdeployqt/macdeployqt $(DMGSTAGE) commithash.h xca-portable.zip msi-installer-dir.zip
 
 do.doc do.lang headers: local.h
 

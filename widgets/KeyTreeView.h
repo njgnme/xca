@@ -14,20 +14,17 @@
 class KeyTreeView: public XcaTreeView
 {
 	Q_OBJECT
-	db_key *keys;
+
+	db_key *keys() const
+	{
+		return dynamic_cast<db_key*>(basemodel);
+	}
 
     public:
-	KeyTreeView(QWidget *parent) : XcaTreeView(parent)
-	{
-		keys = NULL;
-	}
+	KeyTreeView(QWidget *parent) : XcaTreeView(parent) { }
 	void fillContextMenu(QMenu *menu, QMenu *subExport,
 			const QModelIndex &index, QModelIndexList indexes);
-	void setModel(db_key *model=NULL)
-	{
-		keys = model;
-		XcaTreeView::setModel(model);
-	}
+	void showPki(pki_base *pki) const;
 
    public slots:
 	void resetOwnPass();
@@ -36,5 +33,7 @@ class KeyTreeView: public XcaTreeView
 	void initPin();
 	void changeSoPin();
 	void toToken();
+	void newItem();
+	void newItem(const QString &name);
 };
 #endif

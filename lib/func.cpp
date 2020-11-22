@@ -6,18 +6,22 @@
  */
 
 
+#include <unistd.h>
 #include "func.h"
 #include "exception.h"
 #include "lib/asn1time.h"
+#include "lib/settings.h"
 #include "widgets/validity.h"
 #include "widgets/XcaWarning.h"
 #include <openssl/objects.h>
+#include <openssl/sha.h>
 #include <openssl/asn1.h>
 #include <openssl/err.h>
 #include <openssl/bio.h>
 #include <openssl/buffer.h>
 
 #if defined(Q_OS_MAC)
+#include <IOKit/IOKitLib.h>
   #if QT_VERSION < 0x050000
 #include <QDesktopServices>
   #else
@@ -26,6 +30,7 @@
 #endif
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QStringList>
 #include <QLabel>
 #include <QLineEdit>
@@ -36,29 +41,139 @@
 #include <QProgressBar>
 #include <QTextEdit>
 #include <QDebug>
+#include <stdarg.h>
 
 #if defined(Q_OS_WIN32)
 #include <shlobj.h>
+#include <conio.h>
+#ifndef ENABLE_VIRTUAL_TERMINAL_PROCESSING
+#define ENABLE_VIRTUAL_TERMINAL_PROCESSING 0x04
+#endif
+#else
+#include <termios.h>
+#define getch() getchar()
 #endif
 
-QString currentDB;
+int console_write(FILE *fp, const QByteArray &ba)
+{
+	if (ba.size() == 0)
+		return 0;
+#if defined(Q_OS_WIN32)
+	HANDLE con = GetStdHandle(fp == stderr ? STD_ERROR_HANDLE :
+						 STD_OUTPUT_HANDLE);
+	if (con != INVALID_HANDLE_VALUE) {
+		QString string = QString::fromUtf8(ba);
+		WriteConsoleW(con, string.utf16(), string.size(), NULL, NULL);
+		//return 0;
+	}
+#endif
+	fputs(ba.constData(), fp);
+	fflush(fp);
+	return 0;
+}
+
+Passwd readPass()
+{
+	Passwd pw;
+#if !defined(Q_OS_WIN32)
+	struct termios t, back;
+	if (tcgetattr(0, &t))
+		throw errorEx(strerror(errno));
+	back = t;
+	t.c_lflag &= ~(ECHO | ICANON);
+	if (tcsetattr(0, TCSAFLUSH, &t))
+		throw errorEx(strerror(errno));
+#else
+	qFatal("Password input not supported");
+#endif
+	while(1) {
+		char p = getch();
+		if (p == '\n' || p == '\r')
+			break;
+		if (p == 0x7f)
+			pw.chop(1);
+		else
+			pw += p;
+	}
+	fputc('\n', stdout);
+#if !defined(Q_OS_WIN32)
+	if (tcsetattr(0, TCSAFLUSH, &back))
+		throw errorEx(strerror(errno));
+#endif
+	return pw;
+}
 
 QPixmap *loadImg(const char *name )
 {
 	return new QPixmap(QString(":") + name);
 }
 
-QStringList getLibExtensions()
+const QStringList getLibExtensions()
 {
-	QStringList l;
-#if defined(_WIN32) || defined(USE_CYGWIN)
-	l << QString("*.dll") << QString("*.DLL");
+	return QStringList {
+#if defined(Q_OS_WIN32)
+		QString("*.dll"), QString("*.DLL"),
 #elif defined(Q_OS_MAC)
-	l << QString("*.dylib") << QString("*.so");
+		QString("*.dylib"), QString("*.so"),
 #else
-	l << QString("*.so");
+		QString("*.so"),
 #endif
-	return l;
+	};
+}
+
+#if defined(Q_OS_WIN32)
+static QString xcaExeDir()
+{
+	QString dir;
+	wchar_t inst_dir[2048];
+	ULONG dwLength = ARRAY_SIZE(inst_dir);
+
+	dwLength = GetModuleFileNameW(0, inst_dir, dwLength - 1);
+	dir = QString::fromWCharArray(inst_dir, dwLength);
+	int bslash = dir.lastIndexOf("\\");
+	if (bslash > 0)
+		dir = dir.mid(0, bslash);
+	return QFileInfo(dir).canonicalFilePath();
+}
+
+static QString registryInstallDir()
+{
+	QString dir;
+	wchar_t inst_dir[2048] = L"";
+	ULONG len = sizeof inst_dir;
+
+	if (RegGetValueW(HKEY_LOCAL_MACHINE, L"Software\\xca",
+			L"Install_Dir64", RRF_RT_REG_SZ, NULL,
+			inst_dir, &len) != ERROR_SUCCESS)
+		return dir;
+
+	/* "len" is in octets */
+	len /= sizeof inst_dir[0];
+	/* "len" includes the trailing \0\0 */
+	dir = QString::fromWCharArray(inst_dir, len -1);
+	return QFileInfo(dir).canonicalFilePath();
+}
+#endif
+
+int portable_app()
+{
+	static int portable = -1;
+	QString f1, f2;
+	if (portable == -1) {
+#if defined(Q_OS_WIN32)
+		f1 = registryInstallDir();
+		f2 = xcaExeDir();
+		/* f1 == f2 Registry entry of install dir exists and matches
+		 * path of this xca.exe -> Installed. Not the portable app
+		 */
+		portable = f1 == f2 ? 0 : 1;
+		qDebug() << "Portable:" << f1 << " != " << f2;
+#else
+		const char *p = getenv("XCA_PORTABLE");
+		portable = p && *p;
+#endif
+	}
+	return portable;
 }
 
 /* returns e.g. /usr/local/share/xca for unix systems
@@ -66,40 +181,27 @@ QStringList getLibExtensions()
  * (e.g. c:\Program Files\xca )
  */
 
-QString getPrefix()
+const QString getPrefix()
 {
 #if defined(Q_OS_WIN32)
-	static char inst_dir[100] = "";
-	char *p;
-	ULONG dwLength = 100;
-	LONG lRc;
-	HKEY hKey;
+	static QString inst_dir;
+	QString reg_dir;
 
-	if (inst_dir[0] != '\0') {
+	if (!inst_dir.isEmpty()) {
 		/* if we already once discovered the directory just return it */
-		return QString(inst_dir);
+		return inst_dir;
 	}
-	// fallback: directory of xca.exe
-	GetModuleFileName(0, inst_dir, dwLength - 1);
-	p = strrchr(inst_dir, '\\');
-	if (p) {
-		*p = '\0';
+	inst_dir = xcaExeDir();
+
+	if (portable_app())
 		return QString(inst_dir);
-	}
-	p = inst_dir;
-	*p = '\0';
-	lRc = RegOpenKeyEx(HKEY_LOCAL_MACHINE, "Software\\xca", 0, KEY_READ, &hKey);
-	if (lRc != ERROR_SUCCESS) {
-		XCA_WARN("Registry Key: 'HKEY_LOCAL_MACHINE->Software->xca' not found");
-		return QString(inst_dir);
-	}
-	lRc = RegQueryValueEx(hKey, "Install_Dir", NULL, NULL,
-			(unsigned char *)inst_dir, &dwLength);
-	if (lRc != ERROR_SUCCESS){
+
+	reg_dir = registryInstallDir();
+	if (reg_dir.isEmpty())
 		XCA_WARN("Registry Key: 'HKEY_LOCAL_MACHINE->Software->xca->Install_Dir' not found");
-	}
-	lRc = RegCloseKey(hKey);
-	return QString(inst_dir);
+	else
+		inst_dir = reg_dir;
+	return inst_dir;
 
 #elif defined(Q_OS_MAC)
 	// since this is platform-specific anyway,
@@ -116,41 +218,89 @@ QString getPrefix()
 
 }
 
-QString getHomeDir()
-{
-	QString hd;
 #if defined(Q_OS_WIN32)
+static QString specialFolder(int csidl)
+{
 	LPITEMIDLIST pidl = NULL;
-	TCHAR buf[255] = "";
-	if (SUCCEEDED(SHGetSpecialFolderLocation(NULL, CSIDL_PERSONAL, &pidl))) {
-		SHGetPathFromIDList(pidl, buf);
-	}
-	hd = buf;
-#else
-	hd = QDir::homePath();
+	wchar_t buf[MAX_PATH] = L"";
+
+	if (SUCCEEDED(SHGetSpecialFolderLocation(NULL, csidl, &pidl)))
+		SHGetPathFromIDListW(pidl, buf);
+
+	QString f = QString::fromWCharArray(buf);
+	qDebug() << "Special Folder" << csidl << f;
+	return QFileInfo(f).canonicalFilePath();
+}
 #endif
-	return hd;
+
+const QString getHomeDir()
+{
+#if defined(Q_OS_WIN32)
+	return portable_app() ? getPrefix() : specialFolder(CSIDL_PERSONAL);
+#else
+	return QDir::homePath();
+#endif
 }
 
-QString getLibDir()
+/* For portable APP remove leading file name if it is
+ * the app directory.
+ */
+QString relativePath(QString path)
 {
-	QString hd;
-#if defined(Q_OS_WIN32)
-	LPITEMIDLIST pidl = NULL;
-	TCHAR buf[255] = "";
-		if (SUCCEEDED(SHGetSpecialFolderLocation(NULL, CSIDL_SYSTEM, &pidl))) {
-		SHGetPathFromIDList(pidl, buf);
+	QFileInfo fi_path(path);
+	QFileInfo fi_home(getHomeDir());
+
+	QString prefix = fi_home.absoluteFilePath();
+	path = fi_path.absoluteFilePath();
+
+	if (portable_app()) {
+		if (path.startsWith(prefix))
+			path = path.mid(prefix.length()+1);
 	}
-	hd = buf;
-#else
-	hd = QString("/usr/lib");
-#endif
-	return hd;
+	return path;
 }
 
-QString getDocDir()
+const QString getLibDir()
 {
-#if defined(WIN32) || defined (Q_OS_MAC)
+#if defined(Q_OS_WIN32)
+	return specialFolder(CSIDL_SYSTEM);
+#else
+	QString ulib = "/usr/lib/";
+	QString lib = "/lib/";
+	QString multi;
+	QString hd = ulib;
+
+	QFile f(ulib + "pkg-config.multiarch");
+	if (f.open(QIODevice::ReadOnly)) {
+		QTextStream in(&f);
+		multi = in.readLine();
+		if (!multi.isEmpty())
+			multi += "/";
+	}
+	QStringList dirs; dirs
+		<< ulib + multi + "pkcs11/"
+		<< lib + multi + "pkcs11/"
+		<< ulib + "pkcs11/"
+		<< lib + "pkcs11/"
+		<< ulib + multi
+		<< lib + multi
+		<< ulib
+		<< lib;
+	foreach(QString dir, dirs) {
+		if (QDir(dir).exists()) {
+			hd = dir;
+			break;
+		}
+	}
+	return QFileInfo(hd).canonicalFilePath();
+#endif
+}
+
+const QString getDocDir()
+{
+#if defined(Q_OS_WIN32)
+	return getPrefix() + "\\html";
+#elif defined (Q_OS_MAC)
 	return getPrefix();
 #else
 	return QString(DOCDIR);
@@ -161,18 +311,12 @@ QString getDocDir()
 // user-controlled settings on the current platform
 // i.e. PROFILE\Application Data\xca on windows, HOME/.xca on UNIX,
 // ~/Library/Preferences/xca on Mac OS X
-QString getUserSettingsDir()
+const QString getUserSettingsDir()
 {
 	QString rv;
 #if defined(Q_OS_WIN32)
-	LPITEMIDLIST pidl = NULL;
-	TCHAR buf[255] = "";
-	if (SUCCEEDED(SHGetSpecialFolderLocation(NULL, CSIDL_APPDATA, &pidl))) {
-	SHGetPathFromIDList(pidl, buf);
-	}
-	rv = buf;
-	rv += QDir::separator();
-	rv += "xca";
+	rv = portable_app() ? getPrefix() + "/settings" :
+				specialFolder(CSIDL_APPDATA) + "/xca";
 #elif defined(Q_OS_MAC)
   #if QT_VERSION < 0x050000
 	rv = QDesktopServices::storageLocation(QDesktopServices::DataLocation);
@@ -185,11 +329,18 @@ QString getUserSettingsDir()
 		QCoreApplication::applicationName();
   #endif
 #else
-	rv = QDir::homePath();
-	rv += QDir::separator();
-	rv += ".xca";
+	rv = QDir::homePath() + "/.xca";
 #endif
 	return rv;
+}
+
+const QString getI18nDir()
+{
+#if defined(Q_OS_WIN32)
+	return getPrefix() + "\\i18n";
+#else
+	return getPrefix();
+#endif
 }
 
 // Qt's open and save dialogs result in some undesirable quirks.
@@ -206,40 +357,92 @@ QString getFullFilename(const QString & filename, const QString & selectedFilter
 	return rv;
 }
 
-QByteArray filename2bytearray(const QString &fname)
+QString hostId()
 {
+	static QString id;
+	unsigned char guid[100] = "", md[SHA_DIGEST_LENGTH];
+
+	if (!id.isEmpty())
+		return id;
+
 #if defined(Q_OS_WIN32)
-	return fname.toLocal8Bit();
+#define REG_CRYPTO "SOFTWARE\\Microsoft\\Cryptography"
+#define REG_GUID "MachineGuid"
+	ULONG dwGuid = sizeof guid;
+	HKEY hKey;
+
+	if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, REG_CRYPTO, 0,
+			KEY_READ, &hKey) != ERROR_SUCCESS) {
+		XCA_WARN("Registry Key: '" REG_CRYPTO "' not found");
+	} else {
+		if (RegQueryValueExA(hKey, REG_GUID, NULL, NULL,
+			guid, &dwGuid) != ERROR_SUCCESS) {
+			XCA_WARN("Registry Key: '" REG_CRYPTO "\\" REG_GUID
+				 "' not found");
+		}
+	}
+	RegCloseKey(hKey);
+
+#elif defined(Q_OS_MAC)
+	io_registry_entry_t ioRegistryRoot = IORegistryEntryFromPath(
+				kIOMasterPortDefault, "IOService:/");
+	CFStringRef uuidCf = (CFStringRef)IORegistryEntryCreateCFProperty(
+				ioRegistryRoot, CFSTR(kIOPlatformUUIDKey),
+				kCFAllocatorDefault, 0);
+
+	snprintf((char*)guid, sizeof guid, "%s", CCHAR(
+		QString::fromUtf16(CFStringGetCharactersPtr(uuidCf))
+	));
+
+	IOObjectRelease(ioRegistryRoot);
+	CFRelease(uuidCf);
+
 #else
-	return fname.toUtf8();
+	QString mach_id;
+	QStringList dirs; dirs <<
+			"/etc" << "/var/lib/dbus" << "/var/db/dbus";
+	foreach(QString dir, dirs) {
+		QFile file(dir + "/machine-id");
+		if (file.open(QIODevice::ReadOnly)) {
+			QTextStream in(&file);
+			mach_id = in.readLine().trimmed();
+			file.close();
+		}
+		qDebug() << "ID:" << mach_id;
+		if (!mach_id.isEmpty()) {
+			snprintf((char*)guid, sizeof guid, "%s", CCHAR(mach_id));
+			break;
+		}
+	}
+	if (mach_id.isEmpty())
+		sprintf((char*)guid, "%ld", gethostid());
 #endif
+	guid[sizeof guid -1] = 0;
+	SHA1(guid, strlen((char*)guid), md);
+	id = QByteArray((char*)md, (int)sizeof md).toBase64().mid(0, 8);
+
+	qDebug() << "GUID:" << guid << "ID:" << id;
+
+	return id;
 }
 
-QString filename2QString(const char *fname)
+QString compressFilename(const QString &filename, int maxlen)
 {
-#if defined(Q_OS_WIN32)
-	return QString::fromLocal8Bit(fname);
-#else
-	return QString::fromUtf8(fname);
-#endif
-}
-
-QString compressFilename(QString filename, int maxlen)
-{
-	if (filename.length() < maxlen)
-		return filename;
-
-	QString fn = filename.replace("\\", "/");
-	int len, lastslash = fn.lastIndexOf('/');
-	QString base = filename.mid(lastslash);
-	len = base.length();
-	len = maxlen - len -3;
-	if (len < 0)
-		return QString("...") + base.right(maxlen -3);
-	fn = fn.left(len);
-	lastslash = fn.lastIndexOf('/');
-
-	return filename.left(lastslash+1) + "..." + base;
+	QString fn = filename;
+	if (fn.length() >= maxlen) {
+		fn.replace("\\", "/");
+		int len, lastslash = fn.lastIndexOf('/');
+		QString base = filename.mid(lastslash);
+		len = maxlen - base.length() - 3;
+		if (len < 0) {
+			fn = "..." + base.right(maxlen -3);
+		} else {
+			fn = fn.left(len);
+			lastslash = fn.lastIndexOf('/');
+			fn = filename.left(lastslash + 1) + "..." + base;
+		}
+	}
+	return nativeSeparator(fn);
 }
 
 QString asn1ToQString(const ASN1_STRING *str, bool quote)
@@ -354,7 +557,7 @@ void *d2i_bytearray(void *(*d2i)(void *, unsigned char **, long),
 	return ret;
 }
 
-void _openssl_error(const QString txt, const char *file, int line)
+void _openssl_error(const QString &txt, const char *file, int line)
 {
 	QString error;
 
@@ -373,7 +576,7 @@ void _openssl_error(const QString txt, const char *file, int line)
 }
 
 #undef PRINT_IGNORED_ANYWAY
-bool _ign_openssl_error(const QString txt, const char *file, int line)
+bool _ign_openssl_error(const QString &txt, const char *file, int line)
 {
 	// ignore openssl errors
 	QString errtxt;
@@ -395,70 +598,80 @@ bool _ign_openssl_error(const QString txt, const char *file, int line)
 	return !errtxt.isEmpty();
 }
 
-QString formatHash(const unsigned char *md, unsigned size, bool colon)
+QString formatHash(const QByteArray &data, QString sep, int width)
 {
-	QString s, t;
-	for (unsigned j = 0; j < size; j++)
-		s += t.sprintf("%02X%s", md[j],
-				(j+1 == size) || !colon ? "" : ":");
-	return s;
+	return QString(data.toHex()).toUpper()
+			.replace(QRegExp(QString("(.{%1})(?=.)").arg(width)),
+				 QString("\\1") + sep);
 }
 
-void inc_progress_bar(int, int, void *p)
+QByteArray Digest(const QByteArray &data, const EVP_MD *type)
 {
-	QProgressBar *bar = (QProgressBar *)p;
-	int value = bar->value();
+	unsigned int n;
+	unsigned char m[EVP_MAX_MD_SIZE];
 
-	if (value == bar->maximum()) {
-		bar->reset();
-	} else {
-		bar->setValue(value +1);
-	}
+	EVP_Digest(data.constData(), data.size(), m, &n, type, NULL);
+	openssl_error();
+	return QByteArray((char*)m, (int)n);
+}
+
+QString fingerprint(const QByteArray &data, const EVP_MD *type)
+{
+	return formatHash(Digest(data, type),
+			Settings["fp_separator"], Settings["fp_digits"]);
+}
+
+void update_workingdir(const QString &file)
+{
+	Settings["workingdir"] = QFileInfo(file).absolutePath();
 }
 
 QMap<int, QString> dn_translations;
 
 void dn_translations_setup()
 {
-	dn_translations[NID_countryName] = QObject::tr("Country code");
-	dn_translations[NID_stateOrProvinceName] = QObject::tr("State or Province");
-	dn_translations[NID_localityName] = QObject::tr("Locality");
-	dn_translations[NID_organizationName] = QObject::tr("Organisation");
-	dn_translations[NID_organizationalUnitName] = QObject::tr("Organisational unit");
-	dn_translations[NID_commonName] = QObject::tr("Common name");
-	dn_translations[NID_pkcs9_emailAddress] = QObject::tr("E-Mail address");
-	dn_translations[NID_serialNumber] = QObject::tr("Serial number");
-	dn_translations[NID_givenName] = QObject::tr("Given name");
-	dn_translations[NID_surname] = QObject::tr("Surname");
-	dn_translations[NID_title] = QObject::tr("Title");
-	dn_translations[NID_initials] = QObject::tr("Initials");
-	dn_translations[NID_description] = QObject::tr("Description");
-	dn_translations[NID_role] = QObject::tr("Role");
-	dn_translations[NID_pseudonym] = QObject::tr("Pseudonym");
-	dn_translations[NID_generationQualifier] = QObject::tr("Generation Qualifier");
-	dn_translations[NID_x500UniqueIdentifier] = QObject::tr("x500 Unique Identifier");
-	dn_translations[NID_name] = QObject::tr("Name");
-	dn_translations[NID_dnQualifier] = QObject::tr("DN Qualifier");
-	dn_translations[NID_pkcs9_unstructuredName] = QObject::tr("Unstructured name");
-	dn_translations[NID_pkcs9_challengePassword] = QObject::tr("Challenge password");
+QMap<int, QString> D;
+D[NID_countryName] = QObject::tr("Country code");
+D[NID_stateOrProvinceName] = QObject::tr("State or Province");
+D[NID_localityName] = QObject::tr("Locality");
+D[NID_organizationName] = QObject::tr("Organisation");
+D[NID_organizationalUnitName] = QObject::tr("Organisational unit");
+D[NID_commonName] = QObject::tr("Common name");
+D[NID_pkcs9_emailAddress] = QObject::tr("E-Mail address");
+D[NID_serialNumber] = QObject::tr("Serial number");
+D[NID_givenName] = QObject::tr("Given name");
+D[NID_surname] = QObject::tr("Surname");
+D[NID_title] = QObject::tr("Title");
+D[NID_initials] = QObject::tr("Initials");
+D[NID_description] = QObject::tr("Description");
+D[NID_role] = QObject::tr("Role");
+D[NID_pseudonym] = QObject::tr("Pseudonym");
+D[NID_generationQualifier] = QObject::tr("Generation Qualifier");
+D[NID_x500UniqueIdentifier] = QObject::tr("x500 Unique Identifier");
+D[NID_name] = QObject::tr("Name");
+D[NID_dnQualifier] = QObject::tr("DN Qualifier");
+D[NID_pkcs9_unstructuredName] = QObject::tr("Unstructured name");
+D[NID_pkcs9_challengePassword] = QObject::tr("Challenge password");
 
-	dn_translations[NID_basic_constraints] = QObject::tr("Basic Constraints");
-	dn_translations[NID_subject_alt_name] = QObject::tr("Subject alternative name");
-	dn_translations[NID_issuer_alt_name] = QObject::tr("issuer alternative name");
-	dn_translations[NID_subject_key_identifier] = QObject::tr("Subject key identifier");
-	dn_translations[NID_authority_key_identifier] = QObject::tr("Authority key identifier");
-	dn_translations[NID_key_usage] = QObject::tr("Key usage");
-	dn_translations[NID_ext_key_usage] = QObject::tr("Extended key usage");
-	dn_translations[NID_crl_distribution_points] = QObject::tr("CRL distribution points");
-	dn_translations[NID_info_access] = QObject::tr("Authority information access");
-	dn_translations[NID_netscape_cert_type] = QObject::tr("Certificate type");
-	dn_translations[NID_netscape_base_url] = QObject::tr("Base URL");
-	dn_translations[NID_netscape_revocation_url] = QObject::tr("Revocation URL");
-	dn_translations[NID_netscape_ca_revocation_url] = QObject::tr("CA Revocation URL");
-	dn_translations[NID_netscape_renewal_url] = QObject::tr("Certificate renewal URL");
-	dn_translations[NID_netscape_ca_policy_url] = QObject::tr("CA policy URL");
-	dn_translations[NID_netscape_ssl_server_name] = QObject::tr("SSL server name");
-	dn_translations[NID_netscape_comment] = QObject::tr("Comment");
+D[NID_basic_constraints] = QObject::tr("Basic Constraints");
+D[NID_subject_alt_name] = QObject::tr("Subject alternative name");
+D[NID_issuer_alt_name] = QObject::tr("issuer alternative name");
+D[NID_subject_key_identifier] = QObject::tr("Subject key identifier");
+D[NID_authority_key_identifier] = QObject::tr("Authority key identifier");
+D[NID_key_usage] = QObject::tr("Key usage");
+D[NID_ext_key_usage] = QObject::tr("Extended key usage");
+D[NID_crl_distribution_points] = QObject::tr("CRL distribution points");
+D[NID_info_access] = QObject::tr("Authority information access");
+D[NID_netscape_cert_type] = QObject::tr("Certificate type");
+D[NID_netscape_base_url] = QObject::tr("Base URL");
+D[NID_netscape_revocation_url] = QObject::tr("Revocation URL");
+D[NID_netscape_ca_revocation_url] = QObject::tr("CA Revocation URL");
+D[NID_netscape_renewal_url] = QObject::tr("Certificate renewal URL");
+D[NID_netscape_ca_policy_url] = QObject::tr("CA policy URL");
+D[NID_netscape_ssl_server_name] = QObject::tr("SSL server name");
+D[NID_netscape_comment] = QObject::tr("Comment");
+
+dn_translations = D;
 }
 
 QString appendXcaComment(QString current, QString msg)

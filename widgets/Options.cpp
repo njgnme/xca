@@ -8,20 +8,20 @@
 #include "lib/func.h"
 #include "Options.h"
 #include "SearchPkcs11.h"
+#include "XcaWarning.h"
 #include "lib/pki_scard.h"
+#include "lib/oid.h"
 #include <openssl/objects.h>
-#include <QMessageBox>
+#include <QFileDialog>
 #include <QToolTip>
 
-Options::Options(MainWindow *parent)
+Options::Options(QWidget *parent)
 	:QDialog(parent)
 {
-	mw = parent;
-
 	setWindowTitle(XCA_TITLE);
 	setupUi(this);
 
-	foreach(int nid, *MainWindow::dn_nid) {
+	foreach(int nid, distname_nid) {
 		QString n = OBJ_nid2ln(nid);
 		extDNobj->addItem(n);
 		expDNobj->addItem(n);
@@ -44,14 +44,13 @@ Options::Options(MainWindow *parent)
 
 	setDnString(Settings["mandatory_dn"], extDNlist);
 	setDnString(Settings["explicit_dn"], expDNlist);
-	setupPkcs11Provider(Settings["pkcs11path"]);
 
 	suppress->setCheckState(Settings["suppress_messages"]);
 	noColorize->setCheckState(Settings["no_expire_colors"]);
 	transDnEntries->setCheckState(Settings["translate_dn"]);
 	onlyTokenHashes->setCheckState(Settings["only_token_hashes"]);
 	disableNetscape->setCheckState(Settings["disable_netscape"]);
-	adapt_explicit_subject->setCheckState(Settings["adapt_explicit_subject"]);
+	adapt_explicit_subj->setCheckState(Settings["adapt_explicit_subj"]);
 
 	QStringList units;
 	QString x = Settings["ical_expiry"];
@@ -68,12 +67,15 @@ Options::Options(MainWindow *parent)
 	cert_expiry_num->setText(x);
 
 	serial_len->setValue(Settings["serial_len"]);
+
+	pkcs11List->setModel(&pkcs11::libraries);
+	pkcs11List->showDropIndicator();
+	pkcs11List->setSelectionMode(QAbstractItemView::ExtendedSelection);
 }
 
 Options::~Options()
 {
-	if (searchP11)
-		delete searchP11;
+	delete searchP11;
 }
 
 void Options::on_extDNadd_clicked()
@@ -144,14 +146,14 @@ int Options::exec()
 	Settings["mandatory_dn"] = getDnString(extDNlist);
 	Settings["explicit_dn"] = getDnString(expDNlist);
 	Settings["string_opt"] = string_opts[mbstring->currentIndex()];
-	Settings["pkcs11path"] = getPkcs11Provider();
+	Settings["pkcs11path"] = pkcs11::libraries.getPkcs11Provider();
 
 	Settings["cert_expiry"] = cert_expiry_num->text() +
 				cert_expiry_unit->currentItemData().toString();
 	Settings["ical_expiry"] = ical_expiry_num->text() +
 				ical_expiry_unit->currentItemData().toString();
 	Settings["serial_len"] = serial_len->value();
-	Settings["adapt_explicit_subject"] = adapt_explicit_subject->checkState();
+	Settings["adapt_explicit_subj"] = adapt_explicit_subj->checkState();
 
 	return TransCommit() ? QDialog::Accepted : QDialog::Rejected;
 }
@@ -169,86 +171,32 @@ void Options::on_addButton_clicked(void)
 
 void Options::addLib(QString fname)
 {
-	pkcs11_lib *lib;
-	QString status;
-
 	fname = QFileInfo(fname).canonicalFilePath();
+	pkcs11_lib *l = pkcs11::libraries.add_lib(fname);
 
-	if (fname.isEmpty() || pkcs11::get_lib(fname))
-		return;
-	try {
-		lib = pkcs11::load_lib(fname, false);
-		if (lib)
-			status = lib->driverInfo();
-	} catch (errorEx &ex) {
-		lib = NULL;
-		status = ex.getString();
-	}
-	status = status.trimmed();
-	QListWidgetItem *item = new QListWidgetItem(fname);
-	item->setToolTip(status);
-	if (lib)
-		item->setIcon(*MainWindow::doneIco);
-	pkcs11List->addItem(item);
-	if (searchP11)
+	if (searchP11 && l)
 		QToolTip::showText(searchP11->mapToGlobal(
-			QPoint(0,0)), status);
+			QPoint(0,0)), l->driverInfo().trimmed());
 }
 
 void Options::on_removeButton_clicked(void)
 {
-	QListWidgetItem *item = pkcs11List->takeItem(pkcs11List->currentRow());
-	if (!item)
-		return;
-	try {
-		pkcs11::remove_lib(item->text());
-	} catch (errorEx &err) {
-		mw->Error(err);
-	}
+	QList<int> indexes;
+	foreach(QModelIndex i, pkcs11List->selectionModel()->selectedIndexes())
+		indexes << i.row();
+
+	/* Delete from highest to lowest index */
+	std::sort(indexes.begin(), indexes.end(), std::greater<int>());
+	foreach(int i, indexes)
+		pkcs11List->model()->removeRow(i);
 }
 
 void Options::on_searchPkcs11_clicked(void)
 {
 	if (!searchP11) {
-		searchP11 = new SearchPkcs11(this, QString());
+		searchP11 = new SearchPkcs11(this, getLibDir());
 		connect(searchP11, SIGNAL(addLib(QString)),
 			this, SLOT(addLib(QString)));
 	}
 	searchP11->show();
-}
-
-void Options::setupPkcs11Provider(QString list)
-{
-	pkcs11_lib_list libs = pkcs11::get_libs();
-
-	foreach(pkcs11_lib *l, libs) {
-		QListWidgetItem *item = new QListWidgetItem(l->filename());
-		try {
-			item->setToolTip(l->driverInfo());
-			item->setIcon(*MainWindow::doneIco);
-		} catch (errorEx &err) {
-			mw->Error(err);
-		}
-		pkcs11List->addItem(item);
-	}
-	if (!list.isEmpty()) {
-		foreach(QString libname, list.split('\n')) {
-			if (libs.get_lib(libname))
-				continue;
-			QListWidgetItem *item = new QListWidgetItem(libname);
-			item->setToolTip(tr("Load failed"));
-			pkcs11List->addItem(item);
-		}
-	}
-}
-
-QString Options::getPkcs11Provider()
-{
-	QStringList prov;
-	for (int j=0; j<pkcs11List->count(); j++) {
-		prov << pkcs11List->item(j)->text();
-	}
-	if (prov.count() == 0)
-		return QString("");
-	return prov.join("\n");
 }

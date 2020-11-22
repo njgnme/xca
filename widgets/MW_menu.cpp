@@ -7,6 +7,7 @@
 
 
 #include "MainWindow.h"
+#include "XcaApplication.h"
 #include "PwDialog.h"
 #include "Options.h"
 #include "lib/load_obj.h"
@@ -16,6 +17,7 @@
 #include "lib/pki_scard.h"
 #include "lib/func.h"
 #include "lib/db_x509super.h"
+#include "lib/database_model.h"
 #include "ui_Options.h"
 #include "hashBox.h"
 #include "OidResolver.h"
@@ -24,16 +26,36 @@
 #include <QClipboard>
 #include <QMenuBar>
 #include <QMessageBox>
+#include <QFileDialog>
 
-class myLang
+static QAction *languageMenuEntry(const QStringList &sl)
 {
-public:
-	QString english, native;
+	QString lang, tooltip;
 	QLocale locale;
-	myLang(QString e, QString n, QLocale l) {
-		english = e; native = n, locale = l;
+
+	if (sl[0].isEmpty()) {
+		locale = QLocale::system();
+		lang = MainWindow::tr("System");
+	} else {
+		locale = QLocale(sl[0]);
+		lang = QString("%1 (%2)").arg(sl[1])
+			.arg(QLocale::languageToString(locale.language()));
 	}
-};
+	tooltip = locale.nativeLanguageName();
+
+	if (sl.length() > 2)
+		tooltip += " - " + sl[2];
+
+	QAction *a = new QAction(lang, NULL);
+	a->setToolTip(tooltip);
+	a->setData(QVariant(locale));
+	a->setDisabled(!XcaApplication::languageAvailable(locale));
+
+	a->setCheckable(true);
+	if (locale == XcaApplication::language())
+		a->setChecked(true);
+	return a;
+}
 
 void MainWindow::init_menu()
 {
@@ -42,15 +64,14 @@ void MainWindow::init_menu()
 	static QActionGroup * langGroup = NULL;
 	QAction *a;
 
-	QList<myLang> languages;
-	if (file) delete file;
-	if (help) delete help;
-	if (import) delete import;
-	if (token) delete token;
-	if (extra) delete extra;
-	if (languageMenu) delete languageMenu;
-	if (historyMenu) delete historyMenu;
-	if (langGroup) delete langGroup;
+	delete file;
+	delete help;
+	delete import;
+	delete token;
+	delete extra;
+	delete languageMenu;
+	delete historyMenu;
+	delete langGroup;
 
 	wdMenuList.clear();
 	scardList.clear();
@@ -59,40 +80,25 @@ void MainWindow::init_menu()
 	langGroup = new QActionGroup(this);
 
 	historyMenu = new tipMenu(tr("Recent DataBases") + " ...", this);
+	update_history_menu();
+
 	connect(historyMenu, SIGNAL(triggered(QAction*)),
                 this, SLOT(open_database(QAction*)));
-
-	languages <<
-		myLang("System",   tr("System"),   QLocale::system()) <<
-		myLang("Croatian", tr("Croatian"), QLocale("hr")) <<
-		myLang("English",  tr("English"),  QLocale("en")) <<
-		myLang("French",   tr("French"),   QLocale("fr")) <<
-		myLang("German",   tr("German"),   QLocale("de")) <<
-		myLang("Russian",  tr("Russian"),  QLocale("ru")) <<
-		myLang("Slovak",   tr("Slovak"),   QLocale("sk")) <<
-		myLang("Spanish",  tr("Spanish"),  QLocale("es")) <<
-		myLang("Turkish",  tr("Turkish"),  QLocale("tr"));
 
 	languageMenu = new tipMenu(tr("Language"), this);
 	connect(languageMenu, SIGNAL(triggered(QAction*)),
 		qApp, SLOT(switchLanguage(QAction*)));
 
-	foreach(myLang l, languages) {
-		QAction *a = new QAction(l.english, langGroup);
-		a->setToolTip(l.native);
-		a->setData(QVariant(l.locale));
-		a->setDisabled(!XCA_application::languageAvailable(l.locale));
-		a->setCheckable(true);
+	foreach(const QStringList &sl, getTranslators()) {
+		QAction *a = languageMenuEntry(sl);
 		langGroup->addAction(a);
 		languageMenu->addAction(a);
-		if (l.locale == XCA_application::language())
-			a->setChecked(true);
 	}
 	file = menuBar()->addMenu(tr("&File"));
-	file->addAction(tr("&New DataBase"), this, SLOT(new_database()),
+	file->addAction(tr("New DataBase"), this, SLOT(new_database()),
 			QKeySequence::New)
 			->setEnabled(OpenDb::hasSqLite());
-	file->addAction(tr("&Open DataBase"), this, SLOT(load_database()),
+	file->addAction(tr("Open DataBase"), this, SLOT(load_database()),
 			QKeySequence::Open)
 			->setEnabled(OpenDb::hasSqLite());
 	file->addAction(tr("Open Remote DataBase"),
@@ -101,8 +107,8 @@ void MainWindow::init_menu()
 	file->addMenu(historyMenu);
 	file->addAction(tr("Set as default DataBase"), this,
 				SLOT(default_database()));
-	acList += file->addAction(tr("&Close DataBase"), this,
-		SLOT(close_database()), QKeySequence(QKeySequence::Close));
+	acList += file->addAction(tr("Close DataBase"), this,
+		SLOT(close_database()), QKeySequence::Close);
 
 	a = new QAction(tr("Options"), this);
 	connect(a, SIGNAL(triggered()), this, SLOT(setOptions()));
@@ -113,8 +119,10 @@ void MainWindow::init_menu()
 	file->addMenu(languageMenu);
 	file->addSeparator();
 	a = new QAction(tr("Exit"), this);
-	connect(a, SIGNAL(triggered()), qApp, SLOT(quit()));
+	connect(a, SIGNAL(triggered()),
+		qApp, SLOT(quit()), Qt::QueuedConnection);
 	a->setMenuRole(QAction::QuitRole);
+	a->setShortcut(QKeySequence::Quit);
 	file->addAction(a);
 
 	import = menuBar()->addMenu(tr("I&mport"));
@@ -126,9 +134,10 @@ void MainWindow::init_menu()
 	import->addAction(tr("Template"), tempView, SLOT(load()) );
 	import->addAction(tr("Revocation list"), crlView, SLOT(load()));
 	import->addAction(tr("PEM file"), this, SLOT(loadPem()) );
-	import->addAction(tr("Paste PEM file"), this, SLOT(pastePem()));
+	import->addAction(tr("Paste PEM file"), this, SLOT(pastePem()),
+			QKeySequence::Paste);
 
-	token = menuBar()->addMenu(tr("&Token"));
+	token = menuBar()->addMenu(tr("Token"));
 	token->addAction(tr("&Manage Security token"), this,
 				SLOT(manageToken()));
 	token->addAction(tr("&Init Security token"),  this,
@@ -145,7 +154,7 @@ void MainWindow::init_menu()
 				SLOT(dump_database()));
 	acList += extra->addAction(tr("&Export Certificate Index"), this,
 				SLOT(exportIndex()));
-	acList += extra->addAction(tr("&Export Certificate Index hierarchy"), this,
+	acList += extra->addAction(tr("Export Certificate &Index hierarchy"), this,
 				SLOT(exportIndexHierarchy()));
 	acList += extra->addAction(tr("C&hange DataBase password"), this,
 				SLOT(changeDbPass()));
@@ -158,48 +167,42 @@ void MainWindow::init_menu()
 	extra->addAction(tr("OID Resolver"), resolver, SLOT(show()));
 
 	help = menuBar()->addMenu(tr("&Help") );
-	help->addAction(tr("&Content"), this, SLOT(help()),
+	help->addAction(tr("Content"), this, SLOT(help()),
 			QKeySequence::HelpContents);
 	a = new QAction(tr("About"), this);
 	connect(a, SIGNAL(triggered()), this, SLOT(about()));
 	a->setMenuRole(QAction::AboutRole);
+	a->setShortcut(QKeySequence::WhatsThis);
 	help->addAction(a);
 	wdMenuList += import;
 	scardList += token;
 
-	setItemEnabled(!currentDB.isEmpty());
-}
-
-int MainWindow::changeDB(QString fname)
-{
-	if (fname.isEmpty())
-		return 1;
-	close_database();
-	if (!OpenDb::isRemoteDB(fname))
-		homedir = fname.mid(0, fname.lastIndexOf(QDir::separator()));
-	return init_database(fname);
+	setItemEnabled(Database.isOpen());
 }
 
 void MainWindow::update_history_menu()
 {
+	QStringList hist = history.get();
+	if (!historyMenu)
+		return;
 	historyMenu->clear();
-	for (int i = 0, j = 0; i < history.size(); i++) {
+	for (int i = 0, j = 0; i < hist.size(); i++) {
 		QAction *a;
-		QString txt = history[i];
-		if (!QFile::exists(txt) && !OpenDb::isRemoteDB(txt))
+		QString txt = hist[i];
+		if (!QFile::exists(txt) && !database_model::isRemoteDB(txt))
 			continue;
-		txt = txt.remove(0, txt.lastIndexOf(QDir::separator()) +1);
+		txt = QFileInfo(txt).fileName();
 		if (txt.size() > 20)
 			txt = QString("...") + txt.mid(txt.size() - 20);
 		a = historyMenu->addAction(QString("%1 %2").arg(j++).arg(txt));
-		a->setData(QVariant(history[i]));
-		a->setToolTip(history[i]);
+		a->setData(QVariant(hist[i]));
+		a->setToolTip(hist[i]);
 	}
 }
 
 void MainWindow::open_database(QAction* a)
 {
-	changeDB(a->data().toString());
+	init_database(a->data().toString());
 }
 
 void MainWindow::new_database()
@@ -212,7 +215,7 @@ void MainWindow::new_database()
 	// in Qt's OS X file open dialog,
 	// the filename actually ends with that extension.
 	// Otherwise usability breaks in jarring ways.
-	changeDB(getFullFilename(fname, selectedFilter));
+	init_database(getFullFilename(fname, selectedFilter));
 }
 
 void MainWindow::load_database()
@@ -220,7 +223,7 @@ void MainWindow::load_database()
 	load_db l;
 	QString fname = QFileDialog::getOpenFileName(this, l.caption, homedir,
 			l.filter);
-	changeDB(fname);
+	init_database(fname);
 }
 
 void MainWindow::setOptions()
@@ -229,16 +232,12 @@ void MainWindow::setOptions()
 		return;
 
 	Options *opt = new Options(this);
-
-	if (!opt->exec()) {
-		delete opt;
-		enableTokenMenu(pkcs11::loaded());
-		return;
+	if (opt->exec()) {
+		reqView->showHideSections();
+		certView->showHideSections();
 	}
-
-	certView->showHideSections();
-	reqView->showHideSections();
-
-	enableTokenMenu(pkcs11::loaded());
 	delete opt;
+
+	pkcs11::libraries.load(Settings["pkcs11path"]);
+	enableTokenMenu(pkcs11::libraries.loaded());
 }

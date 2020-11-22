@@ -13,7 +13,15 @@
 #include <QItemSelectionModel>
 #include <QSortFilterProxyModel>
 #include <QTimer>
-#include "lib/db_base.h"
+
+class database_model;
+class MainWindow;
+class db_base;
+class dbheader;
+class pki_base;
+class QKeyEvent;
+class QContextMenuEvent;
+class QMenu;
 
 class XcaTreeView: public QTreeView
 {
@@ -31,7 +39,7 @@ class XcaTreeView: public QTreeView
 	XcaTreeView(QWidget *parent = 0);
 	virtual ~XcaTreeView();
 	void contextMenuEvent(QContextMenuEvent *e);
-	virtual void setModel(QAbstractItemModel *model=NULL);
+	void setModel(QAbstractItemModel *model);
 	void setMainwin(MainWindow *mw, QLineEdit *filter);
 	QModelIndex getIndex(const QModelIndex &index);
 	QModelIndex getProxyIndex(const QModelIndex &index);
@@ -48,23 +56,28 @@ class XcaTreeView: public QTreeView
 	void contextMenu(QContextMenuEvent *e,
 			QMenu *parent = NULL, int sect = -1);
 	void keyPressEvent(QKeyEvent *event);
+	virtual void showPki(pki_base *) const {};
 
    public slots:
+	void changeView();
 	void showHideSections();
 	void sectionMoved(int idx, int oldI, int newI);
 	void columnsResize();
 	void editIdx();
 	void setFilter(const QString &pattern);
-	void deleteItems(void);
-	void storeItems(void);
-	void showItems(void);
-	void newItem(void);
+	void deleteItems();
+	void storeItems();
+	void showItems();
+	void newItem();
 	void doubleClick(const QModelIndex &m);
-	void load(void);
-	void pem2clipboard(void);
-	void headerDetails(void);
-	void columnRemove(void);
-	void columnsChanged(void);
-	void editComment(void);
+	void load();
+	void pem2clipboard();
+	void headerDetails();
+	void columnRemove();
+	void columnsChanged();
+	void editComment();
+	void showItem(pki_base *);
+	void showItem(const QModelIndex &index);
+	void showItem(const QString &name);
 };
 #endif

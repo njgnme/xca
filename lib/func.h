@@ -8,48 +8,72 @@
 #ifndef __FUNC_H
 #define __FUNC_H
 
-#include <stdio.h>
-#include <openssl/asn1.h>
 #include <QPixmap>
 #include <QByteArray>
 #include <QMap>
-#include "base.h"
+#include <QTextDocument>
+
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <stdio.h>
 
+#include <openssl/evp.h>
+#include <openssl/asn1.h>
+
+#include "base.h"
+#include "Passwd.h"
+
+#define COL_CYAN  "\x1b[0;36m"
+#define COL_BLUE  "\x1b[0;94m"
+#define COL_GREEN "\x1b[0;92m"
+#define COL_LRED  "\x1b[0;91m"
+#define COL_YELL  "\x1b[0;33m"
+#define COL_RED   "\x1b[0;31m"
+#define COL_RESET "\x1b[0m"
+#define COL_BOLD  "\x1b[1m"
+#define COL_DIM   "\x1b[2m"
+#define COL_UNDER "\x1b[4m"
+
+#define IS_GUI_APP (qobject_cast<QApplication*>(QCoreApplication::instance()))
 class Validity;
-extern QString currentDB;
 
+int console_write(FILE *fp, const QByteArray &ba);
+Passwd readPass();
 QPixmap *loadImg(const char *name);
-QString getPrefix();
-QString getHomeDir();
-QString getLibDir();
-QString getDocDir();
-QString getUserSettingsDir();
-QString getFullFilename(const QString &filename, const QString &selectedFilter);
-QStringList getLibExtensions();
+int portable_app();
+const QString getPrefix();
+const QString getHomeDir();
+const QString getLibDir();
+const QString getDocDir();
+const QString getUserSettingsDir();
+const QString getI18nDir();
 
-QString formatHash(const unsigned char *md, unsigned size, bool colon = true);
-QByteArray filename2bytearray(const QString &fname);
-QString filename2QString(const char *fname);
-QString compressFilename(QString filename, int maxlen = 50);
+QString relativePath(QString path);
+QString getFullFilename(const QString &filename, const QString &selectedFilter);
+const QStringList getLibExtensions();
+QString hostId();
+
+QString formatHash(const QByteArray &data, QString sep = ":", int width = 2);
+QString compressFilename(const QString &filename, int maxlen = 50);
 
 QString asn1ToQString(const ASN1_STRING *str, bool quote = false);
 ASN1_STRING *QStringToAsn1(QString s, int nid);
+
+QByteArray Digest(const QByteArray &data, const EVP_MD *type);
+QString fingerprint(const QByteArray &data, const EVP_MD *type);
+void update_workingdir(const QString &file);
 
 const char *OBJ_ln2sn(const char *ln);
 const char *OBJ_sn2ln(const char *sn);
 const char *OBJ_obj2sn(ASN1_OBJECT *a);
 QString OBJ_obj2QString(const ASN1_OBJECT *a, int no_name = 0);
 
-void inc_progress_bar(int, int, void *p);
-
 extern QMap<int, QString> dn_translations;
 void dn_translations_setup();
 #define openssl_error(x) _openssl_error(QString(x), C_FILE, __LINE__)
 #define ign_openssl_error(x) _ign_openssl_error(QString(x), C_FILE, __LINE__)
-void _openssl_error(const QString txt, const char *file, int line);
-bool _ign_openssl_error(const QString txt, const char *file, int line);
+void _openssl_error(const QString &txt, const char *file, int line);
+bool _ign_openssl_error(const QString &txt, const char *file, int line);
 
 QByteArray i2d_bytearray(int(*i2d)(const void*, unsigned char**), const void*);
 void *d2i_bytearray(void *(*d2i)(void*, unsigned char**, long),
@@ -58,29 +82,13 @@ void *d2i_bytearray(void *(*d2i)(void*, unsigned char**, long),
 #define I2D_VOID(a) ((int (*)(const void *, unsigned char **))(a))
 #define D2I_VOID(a) ((void *(*)(void *, unsigned char **, long))(a))
 
-#define QString2filename(str) filename2bytearray(str).constData()
-
-static inline FILE *fopen_read(QString s)
+static inline QString htmlEscape(const QString &html)
 {
-	return fopen(QString2filename(s), "rb");
-}
-
-static inline FILE *fopen_write(QString s)
-{
-	return fopen(QString2filename(s), "wb");
-}
-
-static inline FILE *fopen_write_key(QString s)
-{
-	mode_t m = umask(077);
-	FILE *f = fopen_write(s);
-	umask(m);
-	return f;
-}
-
-static inline BIO *BIO_from_QByteArray(QByteArray &ba)
-{
-	return BIO_new_mem_buf(ba.data(), ba.length());
+#if QT_VERSION < 0x050000
+	return Qt::escape(html);
+#else
+	return html.toHtmlEscaped();
+#endif
 }
 
 QString appendXcaComment(QString current, QString msg);

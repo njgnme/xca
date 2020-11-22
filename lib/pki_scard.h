@@ -38,9 +38,9 @@ class pki_scard: public pki_key
 	public:
 		pki_scard(const QString name);
 		virtual ~pki_scard();
-		static QPixmap *icon[1];
 		void load_token(pkcs11 &p11, CK_OBJECT_HANDLE object);
-		bool prepare_card(slotid *slot, bool verifyPubkey=true) const;
+		bool prepare_card(slotid *slot) const;
+		bool find_key_on_card(slotid *slot) const;
 		void fromData(const unsigned char *p, db_header_t *head);
 		QString getTypeString(void) const;
 		QString getManufacturer() const
@@ -86,17 +86,15 @@ class pki_scard: public pki_key
 		void setMech_list(QList<CK_MECHANISM_TYPE> ml) { mech_list = ml; };
 		QList<int> possibleHashNids();
 		EVP_PKEY *load_pubkey(pkcs11 &p11, CK_OBJECT_HANDLE object) const;
-		void generateKey_card(int type, slotid slot, int size,
-					int curve_nid, QProgressBar *bar);
+		void generate(const keyjob &task);
 		void deleteFromToken();
-		void deleteFromToken(slotid slot);
-		void store_token(slotid slot, EVP_PKEY *pkey);
-		int renameOnToken(slotid slot, QString name);
+		void deleteFromToken(const slotid &slot);
+		void store_token(const slotid &slot, EVP_PKEY *pkey);
+		int renameOnToken(const slotid &slot, const QString &name);
 		QString getMsg(msg_type msg) const;
 		bool visible() const;
 		QSqlError insertSqlData();
 		QSqlError deleteSqlData();
 		void restoreSql(const QSqlRecord &rec);
 };
-
 #endif

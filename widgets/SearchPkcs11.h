@@ -25,7 +25,7 @@ class searchThread: public QThread
 	bool checkLib(QString file);
 
    public:
-	searchThread(QString _dir, QStringList _ext, bool _recursive);
+	searchThread(QString _dir, const QStringList _ext, bool _recursive);
 	void search(QString mydir);
 	void run()
 	{
@@ -49,7 +49,7 @@ class SearchPkcs11: public QDialog, public Ui::SearchPkcs11
 	searchThread *searching;
 
    public:
-	SearchPkcs11(QWidget *parent, QString fname);
+	SearchPkcs11(QWidget *parent, const QString &fname);
 	~SearchPkcs11();
 
    public slots:

@@ -14,16 +14,19 @@
 #include <QDir>
 #include <QDebug>
 #include <QMimeData>
+#include <QFileDialog>
+#include <QFileInfo>
+#include "widgets/XcaWarning.h"
 #include "widgets/MainWindow.h"
+#include "widgets/XcaApplication.h"
 #include "widgets/ImportMulti.h"
 #include "widgets/XcaDialog.h"
 #include "ui_ItemProperties.h"
 
-
-QHash<quint64, pki_base*> db_base::lookup;
-
 void db_base::restart_timer()
 {
+	if (!IS_GUI_APP)
+		return;
 	killTimer(secondsTimer);
 	killTimer(minutesTimer);
 	killTimer(hoursTimer);
@@ -33,16 +36,15 @@ void db_base::restart_timer()
 	hoursTimer = startTimer(MSECS_PER_HOUR);
 }
 
-db_base::db_base(MainWindow *mw)
-	:QAbstractItemModel(NULL)
+db_base::db_base(const char *classname)
+	:QAbstractItemModel()
 {
-	rootItem = newPKI();
-	rootItem->setIntName(rootItem->getClassName());
-	mainwin = mw;
+	rootItem = new pki_base(QString("ROOTitem(%1)").arg(classname));
+	treeItem = new pki_base(QString("TREEitem(%1)").arg(classname));
 	colResizing = 0;
-	currentIdx = QModelIndex();
-	class_name = "base";
+	class_name = classname;
 	secondsTimer = minutesTimer = hoursTimer = 0;
+	treeview = true;
 	restart_timer();
 }
 
@@ -50,15 +52,16 @@ db_base::~db_base()
 {
 	saveHeaderState();
 	delete rootItem;
+	delete treeItem;
 }
 
 pki_base *db_base::newPKI(enum pki_type type)
 {
 	(void)type;
-	return new pki_base("rootItem");
+	return new pki_base();
 }
 
-void db_base::createSuccess(pki_base *pki)
+void db_base::createSuccess(const pki_base *pki) const
 {
 	if (!pki)
 		return;
@@ -73,12 +76,13 @@ void db_base::remFromCont(const QModelIndex &idx)
 {
 	if (!idx.isValid())
 		return;
-	pki_base *pki = static_cast<pki_base*>(idx.internalPointer());
+	pki_base *pki = fromIndex(idx);
 	pki_base *parent_pki = pki->getParent();
-	int row = pki->row();
+	int row = rownumber(pki);
 
 	beginRemoveRows(parent(idx), row, row);
 	parent_pki->takeChild(pki);
+	rootItem->takeChild(pki);
 	endRemoveRows();
 	emit columnsContentChanged();
 }
@@ -94,20 +98,6 @@ QString db_base::sqlItemSelector()
 	return sl.join(" OR ");
 }
 
-XSqlQuery db_base::sqlSELECTpki(QString query, QList<QVariant> values)
-{
-	XSqlQuery q;
-	int i, num_values = values.size();
-
-	SQL_PREPARE(q, query);
-	for (i=0; i < num_values; i++) {
-		q.bindValue(i, values[i]);
-	}
-	q.exec();
-	MainWindow::dbSqlError(q.lastError());
-	return q;
-}
-
 void db_base::loadContainer()
 {
 	XSqlQuery q;
@@ -117,7 +107,7 @@ void db_base::loadContainer()
 	SQL_PREPARE(q, QString("SELECT * FROM view_") + sqlHashTable);
 	q.exec();
 	e = q.lastError();
-	mainwin->dbSqlError(e);
+	XCA_SQLERROR(e);
 
 	while (q.next()) {
 		enum pki_type t;
@@ -125,8 +115,8 @@ void db_base::loadContainer()
 		t = (enum pki_type)q.value(VIEW_item_type).toInt();
 		pki_base *pki = newPKI(t);
 		pki->restoreSql(rec);
-		insertChild(rootItem, pki);
-		lookup[q.value(VIEW_item_id).toULongLong()] = pki;
+		insertChild(pki);
+		Store.add(q.value(VIEW_item_id), pki);
 	}
 
 	QString view = Settings[class_name + "_hdView"];
@@ -139,6 +129,27 @@ void db_base::loadContainer()
 	}
 	restart_timer();
 	emit columnsContentChanged();
+}
+
+void db_base::reloadContainer(const QList<enum pki_type> &typelist)
+{
+	bool match = false;
+	QList<enum pki_type> all_types = pkitype + pkitype_depends;
+	foreach(enum pki_type t, typelist) {
+		if (all_types.contains(t)) {
+			match = true;
+			break;
+		}
+	}
+	if (!match)
+		return;
+	qDebug() << "RELOAD" << class_name << all_types << typelist;
+	beginResetModel();
+	rootItem->clear();
+	treeItem->clear();
+	endResetModel();
+
+	loadContainer();
 }
 
 void db_base::updateHeaders()
@@ -223,16 +234,21 @@ void db_base::sortIndicatorChanged(int logicalIndex, Qt::SortOrder order)
 
 void db_base::insertPKI(pki_base *pki)
 {
+	QString filename = pki->getFilename();
+	if (!filename.isEmpty()) {
+		pki->selfComment(tr("Import from: %1").arg(filename));
+		pki->setFilename(QString());
+	}
 	Transaction;
 	if (!TransBegin())
 		return;
 	QSqlError e = pki->insertSql();
 	if (e.isValid()) {
-		mainwin->dbSqlError(e);
+		XCA_SQLERROR(e);
 		TransRollback();
 		return;
 	}
-	lookup[pki->getSqlItemId().toULongLong()] = pki;
+	Store.add(pki->getSqlItemId(), pki);
 	inToCont(pki);
 	TransCommit();
 	restart_timer();
@@ -242,24 +258,17 @@ void db_base::insertPKI(pki_base *pki)
 QString db_base::pem2QString(QModelIndexList indexes) const
 {
 	exportType::etype format;
-	QString msg;
+	BioByteArray bba;
 
 	format = clipboardFormat(indexes);
 	foreach(QModelIndex idx, indexes) {
-		long l;
-		const char *p;
 		if (idx.column() != 0)
 			continue;
-		BIO *bio = BIO_new(BIO_s_mem());
-		pki_base *pki = static_cast<pki_base*>
-				(idx.internalPointer());
-		pki->pem(bio, format);
+		pki_base *pki = fromIndex(idx);
+		pki->pem(bba, format);
 		openssl_error();
-		l = BIO_get_mem_data(bio, &p);
-		msg += QString::fromUtf8(p, l);
-		BIO_free(bio);
 	}
-	return msg;
+	return bba.qstring();
 }
 
 void db_base::pem2clipboard(QModelIndexList indexes) const
@@ -274,13 +283,13 @@ void db_base::pem2clipboard(QModelIndexList indexes) const
 
 void db_base::deletePKI(QModelIndex idx)
 {
-	pki_base *pki = static_cast<pki_base*>(idx.internalPointer());
+	pki_base *pki = fromIndex(idx);
 	QSqlDatabase db = QSqlDatabase::database();
 	try {
 		try {
 			pki->deleteFromToken();
 		} catch (errorEx &err) {
-			MainWindow::Error(err);
+			XCA_ERROR(err);
 		}
 		Transaction;
 		if (TransBegin()) {
@@ -288,40 +297,51 @@ void db_base::deletePKI(QModelIndex idx)
 			TransDone(e);
 			if (!e.isValid())
 				remFromCont(idx);
-			mainwin->dbSqlError(e);
+			AffectedItems(pki->getSqlItemId());
+			XCA_SQLERROR(e);
 		}
 	} catch (errorEx &err) {
-		MainWindow::Error(err);
+		XCA_ERROR(err);
 	}
 }
 
-void db_base::showItem(const QModelIndex &index)
-{
-	pki_base *pki = static_cast<pki_base*>(index.internalPointer());
-	if (pki->isVisible() == 1)
-		showPki(pki);
-}
-
-void db_base::showItem(const QString name)
-{
-	pki_base *pki = lookupPki<pki_base>(name.toULongLong());
-	if (pki && pki->isVisible() == 1)
-		showPki(pki);
-}
-
-void db_base::insertChild(pki_base *parent, pki_base *child)
+void db_base::insertChild(pki_base *child, pki_base *parent)
 {
 	QModelIndex idx = QModelIndex();
+	pki_base *curr_parent = child->getParent();
 
-	if (parent == child || parent == NULL)
-		parent = rootItem;
+	if (!parent || parent == child)
+		parent = treeItem;
 
-	if (parent != rootItem)
+	if (curr_parent) {
+		/* Need to take it */
+		if (curr_parent != treeItem && treeview)
+			idx = index(curr_parent);
+		int row = rownumber(child);
+		beginRemoveRows(idx, row, row);
+		curr_parent->takeChild(child);
+		endRemoveRows();
+	}
+
+	if (parent != treeItem && treeview)
 		idx = index(parent);
 
 	beginInsertRows(idx, 0, 0);
-	parent->insert(0,child);
+	parent->insert(child);
+	child->setParent(parent);
+	rootItem->insert(child);
 	endInsertRows();
+
+	qDebug() << "insertChild" << *child << "To parent" << *parent
+		 << "From" << (curr_parent ? QString(*curr_parent) : "NEW")
+		 << "COUNT root" << rootItem->childCount()
+		 << "Count tree" << treeItem->childCount();
+}
+
+int db_base::rownumber(const pki_base *child) const
+{
+	pki_base *parent = treeview ? child->getParent() : rootItem;
+	return parent ? parent->indexOf(child) : 0;
 }
 
 /* Does all the linking from existing keys, crls, certs
@@ -330,13 +350,13 @@ void db_base::insertChild(pki_base *parent, pki_base *child)
  */
 void db_base::inToCont(pki_base *pki)
 {
-	insertChild(rootItem, pki);
+	insertChild(pki);
 }
 
 pki_base *db_base::getByName(QString desc)
 {
-	QList<pki_base*> list = sqlSELECTpki<pki_base>(
-		QString("SELECT id FROM items WHERE name=? AND ") +
+	QList<pki_base*> list = Store.sqlSELECTpki<pki_base>(
+		QString("SELECT id FROM items WHERE name=? AND del=0 AND ") +
 			sqlItemSelector(),
 		QList<QVariant>() << QVariant(desc));
 	return list.isEmpty() ? NULL : list[0];
@@ -346,7 +366,7 @@ pki_base *db_base::getByReference(pki_base *refpki)
 {
 	if (refpki == NULL)
 		return NULL;
-	QList<pki_base*> list = sqlSELECTpki<pki_base>(
+	QList<pki_base*> list = Store.sqlSELECTpki<pki_base>(
 		QString("SELECT item FROM %1 WHERE hash=?").arg(sqlHashTable),
 		QList<QVariant>() << QVariant(refpki->hash()));
 	foreach(pki_base *pki, list) {
@@ -362,52 +382,41 @@ pki_base *db_base::insert(pki_base *item)
 	return item;
 }
 
-void db_base::writeAll(void)
+void db_base::dump(const QString &dir) const
 {
-}
-
-void db_base::dump(QString dirname)
-{
-	dirname += QDir::separator() + class_name;
+	QString dirname = dir + "/" + class_name;
 	QDir d(dirname);
 	if (!d.exists() && !d.mkdir(dirname)) {
-		throw errorEx("Could not create directory '" + dirname + "'");
+		throw errorEx(tr("Could not create directory %1")
+				.arg(nativeSeparator(dirname)));
 	}
 
 	try {
-		FOR_ALL_pki(pki, pki_base) {
+		foreach(pki_base *pki, Store.getAll<pki_base>())
 			pki->writeDefault(dirname);
-		}
 	}
 	catch (errorEx &err) {
-		mainwin->Error(err);
+		XCA_ERROR(err);
 	}
 }
 
-QModelIndex db_base::index(int row, int column, const QModelIndex &parent)
-	                const
+QModelIndex db_base::index(int row, int column,
+			const QModelIndex &parent) const
 {
-	pki_base *parentItem;
+	pki_base *parentItem = treeview ? treeItem : rootItem;
 
-	if(column <0)
-		abort();
-	if (!parent.isValid())
-		parentItem = rootItem;
-	else
-		parentItem = static_cast<pki_base*>(parent.internalPointer());
+	if (parent.isValid() && treeview)
+		parentItem = fromIndex(parent);
 
 	pki_base *childItem = parentItem->child(row);
-	if (childItem)
-		return createIndex(row, column, childItem);
-	else
-		return QModelIndex();
+	return childItem ? createIndex(row, column, childItem) : QModelIndex();
 }
 
 QModelIndex db_base::index(pki_base *pki) const
 {
 	if (!pki)
 		return QModelIndex();
-	return createIndex(pki->row(), 0, pki);
+	return createIndex(rownumber(pki), 0, pki);
 }
 
 QModelIndex db_base::parent(const QModelIndex &idx) const
@@ -415,25 +424,23 @@ QModelIndex db_base::parent(const QModelIndex &idx) const
 	if (!idx.isValid())
 		return QModelIndex();
 
-	pki_base *childItem = static_cast<pki_base*>(idx.internalPointer());
+	pki_base *childItem = fromIndex(idx);
 	pki_base *parentItem = childItem->getParent();
 
-	if (parentItem == rootItem || parentItem == NULL)
-		return QModelIndex();
+	if (parentItem == treeItem || !treeview)
+		parentItem = NULL;
 
 	return index(parentItem);
 }
 
 int db_base::rowCount(const QModelIndex &parent) const
 {
-	pki_base *parentItem;
+	pki_base *parentItem = treeview ? treeItem : rootItem;
 
-	if (!parent.isValid())
-		parentItem = rootItem;
-	else
-		parentItem = static_cast<pki_base*>(parent.internalPointer());
+	if (parent.isValid())
+		parentItem = treeview ? fromIndex(parent) : NULL;
 
-	return parentItem->childCount();
+	return parentItem ? parentItem->childCount() : 0;
 }
 
 int db_base::columnCount(const QModelIndex &) const
@@ -446,7 +453,7 @@ QVariant db_base::data(const QModelIndex &index, int role) const
 	if (!index.isValid())
 		return QVariant();
 	dbheader *hd = allHeaders[index.column()];
-	pki_base *item = static_cast<pki_base*>(index.internalPointer());
+	pki_base *item = fromIndex(index);
 	switch (role) {
 		case Qt::EditRole:
 		case Qt::DisplayRole:
@@ -458,7 +465,7 @@ QVariant db_base::data(const QModelIndex &index, int role) const
 		case Qt::TextAlignmentRole:
 			return hd->isNumeric() ? Qt::AlignRight : Qt::AlignLeft;
 		case Qt::FontRole:
-			return QVariant(XCA_application::tableFont);
+			return QVariant(XcaApplication::tableFont);
 		case Qt::BackgroundRole:
 			return item->bg_color(hd);
 		case Qt::UserRole:
@@ -481,6 +488,13 @@ static QVariant getHeaderViewInfo(dbheader *h)
 	h->getTooltip()
 #endif
 	);
+}
+
+void db_base::changeView()
+{
+	beginResetModel();
+	treeview = !treeview;
+	endResetModel();
 }
 
 QVariant db_base::headerData(int section, Qt::Orientation orientation,
@@ -506,7 +520,7 @@ Qt::ItemFlags db_base::flags(const QModelIndex &index) const
 
 	Qt::ItemFlags flags = QAbstractItemModel::flags(index) |
 				Qt::ItemIsDragEnabled;
-	pki_base *item = static_cast<pki_base*>(index.internalPointer());
+	pki_base *item = fromIndex(index);
 	if (item->isVisible() == 2)
 		flags &= ~Qt::ItemIsEnabled;
 	else if (index.column() == 0)
@@ -520,7 +534,7 @@ bool db_base::setData(const QModelIndex &index, const QVariant &value, int role)
 	pki_base *item;
 	if (index.isValid() && role == Qt::EditRole) {
 		nn = value.toString();
-		item = static_cast<pki_base*>(index.internalPointer());
+		item = fromIndex(index);
 		on = item->getIntName();
 		if (nn == on)
 			return true;
@@ -530,10 +544,14 @@ bool db_base::setData(const QModelIndex &index, const QVariant &value, int role)
 	return false;
 }
 
-void db_base::updateItem(pki_base *pki, QString name, QString comment)
+void db_base::updateItem(pki_base *pki, const QString &name,
+			 const QString &comment)
 {
 	XSqlQuery q;
 	QSqlError e;
+
+	if (name == pki->getIntName() && comment == pki->getComment())
+		return;
 
 	Transaction;
 	TransThrow();
@@ -545,9 +563,8 @@ void db_base::updateItem(pki_base *pki, QString name, QString comment)
 	q.exec();
 	e = q.lastError();
 	AffectedItems(pki->getSqlItemId());
-	mainwin->dbSqlError(e);
-	if (e.isValid())
-		return;
+
+	XCA_SQLERROR(e);
 	TransDone(e);
 	pki->setIntName(name);
 	pki->setComment(comment);
@@ -565,7 +582,7 @@ void db_base::timerEvent(QTimerEvent *event)
 	int youngest = SECS_PER_DAY;
 	int id = event->timerId();
 
-	FOR_ALL_pki(pki, pki_base) {
+	foreach(pki_base *pki, Store.getAll<pki_base>()) {
 		for (int idx=0; idx < allHeaders.count(); idx++) {
 			dbheader *hd = allHeaders[idx];
 			if (hd->type != dbheader::hd_asn1time)
@@ -592,7 +609,7 @@ void db_base::timerEvent(QTimerEvent *event)
 			if (do_emit) {
 				qDebug() << "Date changed for" << pki->getIntName() << ":" << hd->getName() << "Col:" << idx << t.toSortable();
 				QModelIndex i;
-				i = createIndex(pki->row(), idx, pki);
+				i = createIndex(rownumber(pki), idx, pki);
 				emit dataChanged(i, i);
 			}
 		}
@@ -609,7 +626,7 @@ void db_base::timerEvent(QTimerEvent *event)
 
 void db_base::editComment(const QModelIndex &index)
 {
-	pki_base *item = static_cast<pki_base*>(index.internalPointer());
+	pki_base *item = fromIndex(index);
 	if (!index.isValid() || !item)
 		return;
 
@@ -620,7 +637,7 @@ void db_base::editComment(const QModelIndex &index)
 	prop->name->setText(item->getIntName());
 	prop->source->setText(item->pki_source_name());
 	prop->insertionDate->setText(item->getInsertionDate().toPretty());
-	XcaDialog *d = new XcaDialog(mainwin, item->getType(), w,
+	XcaDialog *d = new XcaDialog(NULL, item->getType(), w,
 		tr("Item properties"), QString());
 	if (d->exec())
 		updateItem(item, prop->name->text(), prop->comment->toPlainText());
@@ -630,16 +647,15 @@ void db_base::editComment(const QModelIndex &index)
 void db_base::load_default(load_base &load)
 {
 	QString s;
-	QStringList slist = QFileDialog::getOpenFileNames(mainwin, load.caption,
+	QStringList slist = QFileDialog::getOpenFileNames(NULL, load.caption,
 				Settings["workingdir"], load.filter);
 
 	if (!slist.count())
 		return;
 
-	QString fn = slist[0];
-	Settings["workingdir"] = fn.mid(0, fn.lastIndexOf("/"));
+	update_workingdir(slist[0]);
 
-	ImportMulti *dlgi = new ImportMulti(mainwin);
+	ImportMulti *dlgi = new ImportMulti(NULL);
 	foreach(s, slist) {
 		pki_base *item = NULL;
 		try {
@@ -647,7 +663,7 @@ void db_base::load_default(load_base &load)
 			dlgi->addItem(item);
 		}
 		catch (errorEx &err) {
-			MainWindow::Error(err);
+			XCA_ERROR(err);
 			delete item;
 		}
 	}
@@ -659,10 +675,10 @@ void db_base::store(QModelIndexList indexes)
 {
 	int ret;
 
-	xcaWarning msg(mainwin, tr("How to export the %1 selected items").
+	xcaWarning msg(NULL, tr("How to export the %1 selected items").
 				arg(indexes.size()));
-	msg.addButton(QMessageBox::Ok)->setText(tr("All in one PEM file"));
-	msg.addButton(QMessageBox::Apply)->setText(tr("Each item in one file"));
+	msg.addButton(QMessageBox::Ok, tr("All in one PEM file"));
+	msg.addButton(QMessageBox::Apply, tr("Each item in one file"));
 	msg.addButton(QMessageBox::Cancel);
 	ret = msg.exec();
 	if (ret == QMessageBox::Apply) {
@@ -673,28 +689,22 @@ void db_base::store(QModelIndexList indexes)
 		return;
 	}
 
-	QString fn = Settings["workingdir"] + QDir::separator() + "export.pem";
-	QString s = QFileDialog::getSaveFileName(mainwin,
-		tr("Save %1 items in one file as").arg(indexes.size()), fn,
+	QString s = QFileDialog::getSaveFileName(NULL,
+		tr("Save %1 items in one file as").arg(indexes.size()),
+		Settings["workingdir"] + "export.pem",
 		tr("PEM files ( *.pem );; All files ( * )"));
 	if (s.isEmpty())
 		return;
-	s = nativeSeparator(s);
-	Settings["workingdir"] = s.mid(0, s.lastIndexOf(QRegExp("[/\\\\]")));
+
+	update_workingdir(s);
 	try {
 		QString pem = pem2QString(indexes);
-		FILE *fp = fopen_write(s);
-		if (!fp) {
-			throw errorEx(tr("Error opening file: '%1': %2").
-				arg(s).arg(strerror(errno)), class_name);
-		}
-		if (fwrite(pem.toLatin1(), pem.size(), 1, fp)) {
-			/* IGNORE_RESULT */
-		}
-		fclose(fp);
+		XFile file(s);
+		file.open_write();
+		file.write(pem.toLatin1());
 	}
 	catch (errorEx &err) {
-		MainWindow::Error(err);
+		XCA_ERROR(err);
 	}
 }
 
@@ -735,16 +745,8 @@ QMimeData *db_base::mimeData(const QModelIndexList &indexes) const
 	return mimeData;
 }
 
-void db_base::writeVcalendar(const QString &fname, QStringList vcal)
+void db_base::writeVcalendar(XFile &file, QStringList vcal) const
 {
-	QFile file(fname);
-	file.open(QFile::ReadWrite | QFile::Truncate);
-	if (file.error()) {
-		throw errorEx(tr("Error opening file: '%1': %2")
-			.arg(fname).arg(strerror(errno)));
-		return;
-	}
-
 	QStringList ics; ics <<
 	"BEGIN:VCALENDAR" <<
 	"VERSION:2.0" <<

@@ -10,27 +10,32 @@
 
 #include <QString>
 #include <QObject>
+#include <QSqlError>
+
 #include "base.h"
 
-#define E_PASSWD 1
+enum open_result {
+	pw_cancel,
+	pw_ok,
+	pw_exit,
+	open_abort
+};
 
 class errorEx
 {
-	private:
+	protected:
 		QString msg;
+
 	public:
-		int info;
-		errorEx(QString txt = "", QString className = "", int inf = 0)
+		errorEx(QString txt = "", QString className = "")
 		{
 			msg = txt;
 			if (!className.isEmpty())
 				msg += " (" + className + ")";
-			info = inf;
 		}
-		errorEx(const errorEx &e)
+		errorEx(const QSqlError &e)
 		{
-			msg = e.msg;
-			info = e.info;
+			msg = e.text();
 		}
 		void appendString(QString s)
 		{

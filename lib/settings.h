@@ -77,6 +77,14 @@ class svalue
 	{
 		return get() == "yes" ? Qt::Checked : Qt::Unchecked;
 	}
+	QString operator +(const QString &other)
+	{
+		return get() + other;
+	}
+	QString operator +(const char *other)
+	{
+		return get() + other;
+	}
 };
 
 class settings
@@ -85,7 +93,7 @@ class settings
 
     private:
 	bool loaded;
-	QStringList db_keys;
+	QStringList db_keys, hostspecific;
 	QMap<QString, QString> values;
 	QMap<QString, QString> defaul;
 	void load_settings();

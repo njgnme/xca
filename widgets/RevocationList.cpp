@@ -96,17 +96,15 @@ RevocationList::RevocationList(QWidget *w) : QDialog(w)
 	QPushButton *genCrl;
 	setupUi(this);
 	setWindowTitle(XCA_TITLE);
-	image->setPixmap(*MainWindow::revImg);
+	image->setPixmap(QPixmap(":revImg"));
 
 	genCrl = buttonBox->addButton(tr("Generate CRL"),
 				QDialogButtonBox::ActionRole);
-	connect(genCrl, SIGNAL(clicked(void)), this, SLOT(gencrl(void)));
 
-	connect(certList, SIGNAL(doubleClicked(const QModelIndex &)),
-		this, SLOT(on_editRev_clicked(const QModelIndex &)));
+	connect(genCrl, SIGNAL(clicked()), this, SLOT(gencrl()));
 }
 
-void RevocationList::gencrl(void)
+void RevocationList::gencrl()
 {
 	issuer->setRevocations(getRevList());
 	emit genCRL(issuer);
@@ -124,7 +122,7 @@ const x509revList &RevocationList::getRevList()
 	return revList;
 }
 
-void RevocationList::on_addRev_clicked(void)
+void RevocationList::on_addRev_clicked()
 {
 	Revocation *revoke = new Revocation(this, QModelIndexList());
         if (revoke->exec()) {
@@ -134,7 +132,7 @@ void RevocationList::on_addRev_clicked(void)
 	}
 }
 
-void RevocationList::on_delRev_clicked(void)
+void RevocationList::on_delRev_clicked()
 {
 	QTreeWidgetItem *current = certList->currentItem();
 	x509rev rev;
@@ -152,7 +150,11 @@ void RevocationList::on_delRev_clicked(void)
 
 void RevocationList::on_editRev_clicked()
 {
-	QTreeWidgetItem *current = certList->currentItem();
+	on_certList_itemDoubleClicked(certList->currentItem());
+}
+
+void RevocationList::on_certList_itemDoubleClicked(QTreeWidgetItem *current)
+{
 	x509rev rev;
 	int idx;
 
@@ -191,18 +193,17 @@ Revocation::Revocation(QWidget *w, QModelIndexList indexes) : QDialog(w)
 		serial->setText(QString("Batch revocation of %1 Certificates").
 				arg(indexes.size()));
 		foreach(QModelIndex idx, indexes) {
-			pki_x509 *cert = static_cast<pki_x509*>
-				(idx.internalPointer());
-			serials << cert->getSerial();
+			pki_x509 *cert = db_base::fromIndex<pki_x509>(idx);
+			if (cert)
+				serials << cert->getSerial();
 		}
-		qSort(serials.begin(), serials.end());
+		std::sort(serials.begin(), serials.end());
 		foreach(a1int a, serials)
 			sl << a;
 		serial->setToolTip(sl.join("\n"));
 		serial->setEnabled(false);
 	} else if (indexes.size() == 1) {
-		pki_x509 *cert = static_cast<pki_x509*>
-				(indexes[0].internalPointer());
+		pki_x509 *cert = db_base::fromIndex<pki_x509>(indexes[0]);
 		serial->setText(cert->getSerial());
 		serial->setEnabled(false);
 	} else {

@@ -3,12 +3,10 @@
 #include "exception.h"
 #include "pki_scard.h"
 #include "sql.h"
-#include "widgets/MainWindow.h"
+#include "widgets/XcaWarning.h"
 
-db_token::db_token(MainWindow *mw)
-        :db_base(mw)
+db_token::db_token() : db_base("manageTokens")
 {
-	class_name = "manageTokens";
 	updateHeaders();
 }
 
@@ -23,7 +21,7 @@ void db_token::rename_token_in_database(pki_scard *token)
 	Transaction;
 	if (!TransBegin())
 		return;
-	QList<pki_scard*> list = sqlSELECTpki<pki_scard>(
+	QList<pki_scard*> list = Store.sqlSELECTpki<pki_scard>(
                 QString("SELECT item FROM tokens "
 			"WHERE card_serial=? AND card_model=? and object_id=?"),
                 QList<QVariant>() << QVariant(token->getSerial())
@@ -43,7 +41,7 @@ bool db_token::setData(const QModelIndex &index, const QVariant &value, int role
 	pki_base *item;
 	if (index.isValid() && role == Qt::EditRole) {
 		nn = value.toString();
-		item = static_cast<pki_base*>(index.internalPointer());
+		item = fromIndex(index);
 		on = item->getIntName();
 		if (on == nn)
 			return true;
@@ -56,7 +54,7 @@ bool db_token::setData(const QModelIndex &index, const QVariant &value, int role
 				return true;
 			}
 		} catch (errorEx &err) {
-			mainwin->Error(err);
+			XCA_ERROR(err);
 		}
 	}
 	return false;

@@ -8,20 +8,18 @@
 
 #include "db_temp.h"
 #include "func.h"
-#include <widgets/NewX509.h>
-#include <widgets/XcaDialog.h>
-#include <widgets/MainWindow.h>
+#include "widgets/XcaWarning.h"
+#include "widgets/NewX509.h"
+#include "widgets/XcaDialog.h"
 #include <QFileDialog>
 #include <QDir>
 #include <QContextMenuEvent>
 #include <QAction>
 #include <QInputDialog>
-#include <QMessageBox>
+#include <QFileInfo>
 
-db_temp::db_temp(MainWindow *mw)
-	:db_x509name(mw)
+db_temp::db_temp() : db_x509name("templates")
 {
-	class_name = "templates";
 	sqlHashTable = "templates";
 	pkitype << tmpl;
 
@@ -40,8 +38,7 @@ db_temp::db_temp(MainWindow *mw)
 
 	for (int i = 0; i < list.size(); ++i) {
 		QFileInfo fileInfo = list.at(i);
-		QString name = getPrefix() + QDir::separator() +
-				fileInfo.fileName();
+		QString name = getPrefix() + "/" + fileInfo.fileName();
 		if (!name.endsWith(".xca", Qt::CaseInsensitive))
 			continue;
 		try {
@@ -51,16 +48,15 @@ db_temp::db_temp(MainWindow *mw)
 				predefs << tmpl;
 			}
 		} catch(errorEx &err) {
-			XCA_WARN(tr("Bad template: %1").arg(name));
+			XCA_WARN(tr("Bad template: %1")
+				.arg(nativeSeparator(name)));
 		}
 	}
 }
 
 db_temp::~db_temp()
 {
-	return;
-	while (!predefs.isEmpty())
-		delete predefs.takeFirst();
+	qDeleteAll(predefs);
 }
 
 pki_base *db_temp::newPKI(enum pki_type type)
@@ -69,93 +65,15 @@ pki_base *db_temp::newPKI(enum pki_type type)
 	return new pki_temp("");
 }
 
-QList<pki_temp *> db_temp::getAllAndPredefs()
+QList<pki_temp *> db_temp::getPredefs() const
 {
-	return predefs + getAll<pki_temp>();
-}
-
-bool db_temp::runTempDlg(pki_temp *temp)
-{
-	NewX509 *dlg = new NewX509(mainwin);
-	emit connNewX509(dlg);
-
-	dlg->setTemp(temp);
-	if (!dlg->exec()) {
-		delete dlg;
-		return false;
-	}
-	dlg->toTemplate(temp);
-	delete dlg;
-	return true;
-}
-
-void db_temp::newItem()
-{
-	pki_temp *temp = NULL;
-	QString type;
-
-	itemComboTemp *ic = new itemComboTemp(NULL);
-	ic->insertPkiItems(predefs);
-	XcaDialog *dlg = new XcaDialog(mainwin, tmpl, ic,
-				tr("Preset Template values"), QString());
-	if (dlg->exec()) {
-		temp = new pki_temp(ic->currentPkiItem());
-		temp->pkiSource = generated;
-		if (temp) {
-			if (runTempDlg(temp)) {
-				insertPKI(temp);
-				createSuccess(temp);
-			} else {
-				delete temp;
-			}
-		}
-	}
-	delete dlg;
-}
-void db_temp::showPki(pki_base *pki)
-{
-	pki_temp *t = dynamic_cast<pki_temp *>(pki);
-	if (t)
-		alterTemp(t);
-}
-
-void db_temp::load()
-{
-	load_temp l;
-	load_default(l);
-}
-
-void db_temp::store(QModelIndex index)
-{
-	if (!index.isValid())
-		return;
-
-	pki_temp *temp = static_cast<pki_temp*>(index.internalPointer());
-
-	QString fn = Settings["workingdir"] + QDir::separator() +
-		temp->getUnderlinedName() + ".xca";
-	QString s = QFileDialog::getSaveFileName(mainwin,
-		tr("Save template as"),	fn,
-		tr("XCA templates ( *.xca );; All files ( * )"));
-	if (s.isEmpty())
-		return;
-	s = nativeSeparator(s);
-	Settings["workingdir"] = s.mid(0, s.lastIndexOf(QRegExp("[/\\\\]")));
-	try {
-		temp->writeTemp(s);
-	}
-	catch (errorEx &err) {
-		MainWindow::Error(err);
-	}
+	return predefs;
 }
 
 bool db_temp::alterTemp(pki_temp *temp)
 {
 	XSqlQuery q;
 	QSqlError e;
-
-	if (!runTempDlg(temp))
-		return false;
 
 	Transaction;
 	if (!TransBegin())
@@ -166,7 +84,7 @@ bool db_temp::alterTemp(pki_temp *temp)
 	q.bindValue(2, temp->getSqlItemId());
 	q.exec();
 	e = q.lastError();
-	mainwin->dbSqlError(e);
+	XCA_SQLERROR(e);
 	if (e.isValid()) {
 		TransRollback();
 		return false;
@@ -174,4 +92,36 @@ bool db_temp::alterTemp(pki_temp *temp)
 	updateItem(temp, temp->getIntName(), temp->getComment());
 	TransCommit();
 	return true;
+}
+
+void db_temp::load()
+{
+	load_temp l;
+	load_default(l);
+}
+
+void db_temp::store(QModelIndex index)
+{
+	pki_temp *temp = fromIndex<pki_temp>(index);
+
+	if (!index.isValid() || !temp)
+		return;
+
+	QString fn = Settings["workingdir"] +
+		temp->getUnderlinedName() + ".xca";
+	QString s = QFileDialog::getSaveFileName(NULL,
+		tr("Save template as"),	fn,
+		tr("XCA templates ( *.xca );; All files ( * )"));
+	if (s.isEmpty())
+		return;
+
+	update_workingdir(s);
+	try {
+		XFile file(s);
+		file.open_key();
+		temp->writeTemp(file);
+	}
+	catch (errorEx &err) {
+		XCA_ERROR(err);
+	}
 }

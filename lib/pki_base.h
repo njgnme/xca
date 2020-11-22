@@ -1,6 +1,6 @@
 /* vi: set sw=4 ts=4:
  *
- * Copyright (C) 2001 - 2012 Christian Hohnstaedt.
+ * Copyright (C) 2001 - 2020 Christian Hohnstaedt.
  *
  * All rights reserved.
  */
@@ -8,23 +8,22 @@
 #ifndef __PKI_BASE_H
 #define __PKI_BASE_H
 
-#include <openssl/err.h>
 #include <QString>
-#include <QListView>
+#include <QRegExp>
+#include <QVariant>
+#include <QByteArray>
+#include "BioByteArray.h"
 #include "asn1time.h"
 #include "pkcs11_lib.h"
-#include "db.h"
 #include "base.h"
+#include "db.h"
+#include "pki_lookup.h"
 #include "headerlist.h"
-#include "settings.h"
 #include "sql.h"
+#include "xfile.h"
 
-#define __ME QString("(%1[%2]:%3)") \
-		.arg(getClassName()) \
-		.arg(getSqlItemId().toString()) \
-		.arg(getIntName())
-#define pki_openssl_error() _openssl_error(__ME, C_FILE, __LINE__)
-#define pki_ign_openssl_error() _ign_openssl_error(__ME, C_FILE, __LINE__)
+#define pki_openssl_error() _openssl_error(*this, C_FILE, __LINE__)
+#define pki_ign_openssl_error() _ign_openssl_error(*this, C_FILE, __LINE__)
 
 enum pki_source {
 	unknown,
@@ -32,7 +31,8 @@ enum pki_source {
 	generated,
 	transformed,
 	token,
-	legacy_db
+	legacy_db,
+	renewed
 };
 
 #define VIEW_item_id 0
@@ -42,6 +42,8 @@ enum pki_source {
 #define VIEW_item_source 4
 #define VIEW_item_comment 5
 
+extern pki_lookup Store;
+
 class pki_base : public QObject
 {
 		Q_OBJECT
@@ -49,7 +51,10 @@ class pki_base : public QObject
 	public: /* static */
 		static QRegExp limitPattern;
 		static QString rmslashdot(const QString &fname);
-		static unsigned hash(QByteArray ba);
+		static unsigned hash(const QByteArray &ba);
+		static bool pem_comment;
+		static int count;
+		static QList<pki_base*> allitems;
 
 	protected:
 		QVariant sqlItemId;
@@ -58,8 +63,11 @@ class pki_base : public QObject
 		enum pki_type pkiType;
 		/* model data */
 		pki_base *parent;
-		void my_error(const QString myerr) const;
-		void fopen_error(const QString fname);
+		void my_error(const QString &error) const;
+		QString filename;
+		virtual void PEM_file_comment(XFile &file) const;
+		virtual void collect_properties(QMap<QString, QString> &) const;
+		QList<pki_base*> childItems;
 
 	public:
 		enum msg_type {
@@ -68,32 +76,48 @@ class pki_base : public QObject
 			msg_delete_multi,
 			msg_create,
 		};
+		enum print_opt {
+			print_openssl_txt,
+			print_pem,
+			print_coloured,
+		};
 		enum pki_source pkiSource;
-		QList<pki_base*> childItems;
 
-		pki_base(const QString d = "", pki_base *p = NULL);
+		pki_base(const QString &d = QString(), pki_base *p = NULL);
+		pki_base(const pki_base *p);
 		virtual ~pki_base();
 
+		QList<pki_base*> getChildItems() const;
+		void clear();
 		QString getIntName() const
 		{
 			return desc;
 		}
-		virtual QString comboText() const;
-		QString getUnderlinedName() const
+		void setFilename(const QString &s)
 		{
-			return getIntName().replace(
-				QRegExp("[ &;`/\\\\]+"), "_");
+			filename = s;
 		}
+		QString getFilename() const
+		{
+			return filename;
+		}
+		void inheritFilename(pki_base *pki) const
+		{
+			pki->setFilename(getFilename());
+		}
+		virtual QString comboText() const;
+		virtual void print(BioByteArray &b, enum print_opt opt) const;
+		QString getUnderlinedName() const;
 		void setIntName(const QString &d)
 		{
 			desc = d;
 		}
-		virtual void autoIntName();
+		virtual void autoIntName(const QString &file);
 		QString getComment() const
 		{
 			return comment;
 		}
-		void setComment(QString c)
+		void setComment(const QString &c)
 		{
 			comment = c;
 		}
@@ -120,27 +144,25 @@ class pki_base : public QObject
 
 		/* Tree View management */
 		void setParent(pki_base *p);
-		virtual pki_base *getParent();
+		pki_base *getParent() const;
 		pki_base *child(int row);
-		void append(pki_base *item);
-		void insert(int row, pki_base *item);
+		void insert(pki_base *item);
 		int childCount() const;
-		pki_base *iterate(pki_base *pki = NULL);
 		void takeChild(pki_base *pki);
 		pki_base *takeFirst();
+		int indexOf(const pki_base *child) const;
 
 		/* Token handling */
 		virtual void deleteFromToken();
-		virtual void deleteFromToken(slotid);
-		virtual int renameOnToken(slotid, QString);
+		virtual void deleteFromToken(const slotid &);
+		virtual int renameOnToken(const slotid &, const QString &);
 
 		/* Import / Export management */
-		virtual BIO *pem(BIO *, int format=0);
-		virtual void fromPEM_BIO(BIO *, QString);
-		virtual void fromPEMbyteArray(QByteArray &, QString);
-		void fwrite_ba(FILE *fp, QByteArray ba, QString fname);
-		virtual void fload(const QString);
-		virtual void writeDefault(const QString);
+		virtual bool pem(BioByteArray &b, int format=0);
+		virtual void fromPEM_BIO(BIO *, const QString &);
+		virtual void fromPEMbyteArray(const QByteArray &, const QString &);
+		virtual void fload(const QString &);
+		virtual void writeDefault(const QString&) const;
 
 		/* Old database management methods */
 		virtual void fromData(const unsigned char *, db_header_t *) {};
@@ -150,7 +172,6 @@ class pki_base : public QObject
 			(void)hd;
 			return QVariant();
 		}
-		int row() const;
 		virtual QVariant column_data(const dbheader *hd) const;
 		virtual QVariant getIcon(const dbheader *hd) const;
 		virtual QVariant column_tooltip(const dbheader *hd) const;
@@ -174,10 +195,16 @@ class pki_base : public QObject
 		QSqlError sqlItemNotFound(QVariant sqlId) const;
 		unsigned hash() const;
 		QString pki_source_name() const;
-		QString get_dump_filename(const QString &dir, QString ext);
+		QString get_dump_filename(const QString &dirname,
+					  const QString &ext) const;
 		void selfComment(QString msg);
 		QStringList icsVEVENT(const a1time &expires,
 		    const QString &summary, const QString &description) const;
+		operator QString() const
+		{
+			return QString("(%1[%2]:%3)").arg(getClassName())
+				.arg(getSqlItemId().toString()).arg(getIntName());
+		}
 };
 
 Q_DECLARE_METATYPE(pki_base *);

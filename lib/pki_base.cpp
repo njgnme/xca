@@ -1,35 +1,56 @@
 /* vi: set sw=4 ts=4:
  *
- * Copyright (C) 2001 - 2013 Christian Hohnstaedt.
+ * Copyright (C) 2001 - 2020 Christian Hohnstaedt.
  *
  * All rights reserved.
  */
 
 
 #include "func.h"
+#include "xfile.h"
 #include "pki_base.h"
 #include "exception.h"
+#include "widgets/XcaWarning.h"
 #include <QString>
 #include <openssl/evp.h>
 #include <openssl/sha.h>
 #include <openssl/md5.h>
 #include <typeinfo>
 
-QRegExp pki_base::limitPattern;
+pki_lookup Store;
 
-pki_base::pki_base(const QString name, pki_base *p)
+QRegExp pki_base::limitPattern;
+bool pki_base::pem_comment;
+QList<pki_base*> pki_base::allitems;
+
+pki_base::pki_base(const QString &name, pki_base *p)
 {
 	desc = name;
 	parent = p;
 	childItems.clear();
 	pkiType=none;
 	pkiSource=unknown;
+	allitems << this;
+	qDebug() << "NEW pki_base::count" << allitems.count();
+}
+
+pki_base::pki_base(const pki_base *p)
+{
+	desc = p->desc;
+	parent = p->parent;
+	childItems.clear();
+	pkiType = p->pkiType;
+	pkiSource = p->pkiSource;
+	allitems << this;
+	qDebug() << "COPY pki_base::count" << allitems.count();
+	p->inheritFilename(this);
 }
 
 pki_base::~pki_base(void)
 {
-	while (childItems.size() > 0)
-		delete takeFirst();
+	if (!allitems.removeOne(this))
+		qDebug() << "DEL" << getIntName() << "NOT FOUND";
+	qDebug() << "DEL pki_base::count" << allitems.count();
 }
 
 QString pki_base::comboText() const
@@ -37,19 +58,29 @@ QString pki_base::comboText() const
 	return desc;
 }
 
-void pki_base::autoIntName()
+void pki_base::autoIntName(const QString &file)
 {
-	setIntName("");
+	setIntName(rmslashdot(file));
 }
 
-void pki_base::deleteFromToken() { };
-void pki_base::deleteFromToken(slotid) { };
-void pki_base::writeDefault(const QString) { }
-void pki_base::fromPEM_BIO(BIO *, QString) { }
-void pki_base::fload(const QString) { }
-int pki_base::renameOnToken(slotid, QString)
+void pki_base::deleteFromToken() { }
+void pki_base::deleteFromToken(const slotid &) { }
+void pki_base::writeDefault(const QString&) const { }
+void pki_base::fromPEM_BIO(BIO *, const QString &) { }
+void pki_base::fload(const QString &) { }
+int pki_base::renameOnToken(const slotid &, const QString &)
 {
 	return 0;
+}
+
+QString pki_base::getUnderlinedName() const
+{
+	QString name = getIntName();
+	QRegExp rx("^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$");
+
+	if (rx.indexIn(name) != -1)
+		name += "_";
+	return name.replace(QRegExp("[ $&;`/\\\\<>:\"/\\|?*]+"), "_");
 }
 
 bool pki_base::visible() const
@@ -58,6 +89,20 @@ bool pki_base::visible() const
 		return true;
 	return getIntName().contains(limitPattern) ||
 		comment.contains(limitPattern);
+}
+
+void pki_base::PEM_file_comment(XFile &file) const
+{
+	if (!pem_comment)
+		return;
+	file.write(QString("XCA internal name: %1\n%2\n")
+			.arg(getIntName()).arg(getComment())
+				.toUtf8());
+}
+
+void pki_base::clear()
+{
+	childItems.clear();
 }
 
 bool pki_base::childVisible() const
@@ -86,10 +131,9 @@ QByteArray pki_base::i2d() const
 	return QByteArray();
 }
 
-BIO *pki_base::pem(BIO *, int format)
+bool pki_base::pem(BioByteArray &, int)
 {
-	(void)format;
-	return NULL;
+	return false;
 }
 
 const char *pki_base::getClassName() const
@@ -97,23 +141,7 @@ const char *pki_base::getClassName() const
 	return typeid(*this).name();
 }
 
-void pki_base::fopen_error(const QString fname)
-{
-	my_error(tr("Error opening file: '%1': %2").
-			arg(fname).
-			arg(strerror(errno)));
-}
-
-void pki_base::fwrite_ba(FILE *fp, QByteArray ba, QString fname)
-{
-	if (fwrite(ba.constData(), 1, ba.size(), fp) != (size_t)ba.size()) {
-		my_error(tr("Error writing to file: '%1': %2").
-			arg(fname).
-			arg(strerror(errno)));
-        }
-}
-
-void pki_base::my_error(const QString error) const
+void pki_base::my_error(const QString &error) const
 {
 	if (!error.isEmpty()) {
 		qCritical() << "Error:" << error;
@@ -122,14 +150,11 @@ void pki_base::my_error(const QString error) const
 }
 
 
-void pki_base::fromPEMbyteArray(QByteArray &ba, QString name)
+void pki_base::fromPEMbyteArray(const QByteArray &ba, const QString &name)
 {
-	BIO *bio = BIO_new_mem_buf(ba.data(), ba.length());
-	fromPEM_BIO(bio, name);
-	BIO_free(bio);
-	autoIntName();
-	if (getIntName().isEmpty())
-		setIntName(rmslashdot(name));
+	fromPEM_BIO(BioByteArray(ba).ro(), name);
+	autoIntName(name);
+	setFilename(name);
 }
 
 QString pki_base::rmslashdot(const QString &s)
@@ -194,7 +219,7 @@ QSqlError pki_base::deleteSql()
 	e = deleteSqlData();
 	if (e.isValid())
 		return e;
-	SQL_PREPARE(q, "DELETE FROM items WHERE id=?");
+	SQL_PREPARE(q, "UPDATE items SET del=1 WHERE id=?");
 	q.bindValue(0, sqlItemId);
 	q.exec();
 	return q.lastError();
@@ -209,7 +234,7 @@ QSqlError pki_base::sqlItemNotFound(QVariant sqlId) const
 			QSqlError::UnknownError);
 }
 
-pki_base *pki_base::getParent()
+pki_base *pki_base::getParent() const
 {
 	return parent;
 }
@@ -224,16 +249,10 @@ pki_base *pki_base::child(int row)
 	return childItems.value(row);
 }
 
-void pki_base::append(pki_base *item)
+void pki_base::insert(pki_base *item)
 {
-	childItems.append(item);
-	item->setParent(this);
-}
-
-void pki_base::insert(int row, pki_base *item)
-{
-	childItems.insert(row, item);
-	item->setParent(this);
+	if (!childItems.contains(item))
+		childItems.prepend(item);
 }
 
 int pki_base::childCount() const
@@ -241,32 +260,21 @@ int pki_base::childCount() const
 	return childItems.size();
 }
 
-int pki_base::row(void) const
+int pki_base::indexOf(const pki_base *child) const
 {
-	if (parent)
-		return parent->childItems.indexOf(const_cast<pki_base*>(this));
-	return 0;
-}
-
-pki_base *pki_base::iterate(pki_base *pki)
-{
-	if (pki == NULL)
-		pki = (childItems.isEmpty()) ? NULL : childItems.first();
-	else
-		pki = childItems.value(pki->row()+1);
-
-	if (pki) {
-		return pki;
-	}
-	if (!parent) {
-		return NULL;
-	}
-	return parent->iterate(this);
+	int ret = childItems.indexOf(const_cast<pki_base *>(child));
+	return ret >= 0 ? ret : 0;
 }
 
 void pki_base::takeChild(pki_base *pki)
 {
-	childItems.takeAt(pki->row());
+	childItems.removeOne(pki);
+}
+
+QList<pki_base*> pki_base::getChildItems() const
+{
+	//#warning need to collect all children below folders (later)
+	return childItems;
 }
 
 pki_base *pki_base::takeFirst()
@@ -284,6 +292,7 @@ QString pki_base::pki_source_name() const
 		case transformed: return tr("Transformed");
 		case token: return tr("Token");
 		case legacy_db: return tr("Legacy Database");
+		case renewed: return tr("Renewed");
 	}
 	return QString("???");
 }
@@ -346,7 +355,7 @@ bool pki_base::compare(const pki_base *ref) const
 }
 
 /* Unsigned 32 bit integer */
-unsigned pki_base::hash(QByteArray ba)
+unsigned pki_base::hash(const QByteArray &ba)
 {
 	unsigned char md[EVP_MAX_MD_SIZE];
 
@@ -361,12 +370,13 @@ unsigned pki_base::hash() const
 	return hash(i2d());
 }
 
-QString pki_base::get_dump_filename(const QString &dir, QString ext)
+QString pki_base::get_dump_filename(const QString &dir,
+				    const QString &ext) const
 {
 	QString ctr = "", fn;
 	int count = 0;
 	while (count++ < 1000) {
-		fn = dir +QDir::separator() +getUnderlinedName() +ctr +ext;
+		fn = dir + "/" + getUnderlinedName() + ctr + ext;
 		if (!QFile::exists(fn))
 			return fn;
 		ctr = QString("_%1").arg(count);
@@ -377,6 +387,57 @@ QString pki_base::get_dump_filename(const QString &dir, QString ext)
 void pki_base::selfComment(QString msg)
 {
 	setComment(appendXcaComment(getComment(), msg));
+}
+
+void pki_base::collect_properties(QMap<QString, QString> &prp) const
+{
+	QString t;
+	prp["Descriptor"] = getIntName();
+	if (getComment().size() > 0)
+		prp["Comment"] = "\n" + getComment().replace('\n', "\n    ");
+	switch (pkiType) {
+	case asym_key:   t = "Asymetric Key"; break;
+	case x509_req:   t = "PKCS#10 Certificate request"; break;
+	case x509:       t = "x.509 Certificate"; break;
+	case revocation: t = "Certificate revocation list"; break;
+	case tmpl:       t = "XCA Template"; break;
+	default:         t = "Unknown"; break;
+	}
+	prp["Type"] = t;
+}
+
+void pki_base::print(BioByteArray &bba, enum print_opt opt) const
+{
+	static const QStringList order = {
+		"Type", "Descriptor", "Subject", "Issuer", "Serial",
+		"Not Before", "Not After", "Verify Ok",
+		"Unstructured Name", "Challange Password",
+		"Last Update", "Next Update", "CA", "Self signed",
+		"Key", "Signature", "Extensions", "Comment",
+	};
+	if (opt == print_coloured) {
+		QMap<QString, QString> prp;
+		QStringList keys;
+		int w = 0;
+
+		collect_properties(prp);
+		keys = prp.keys();
+
+		foreach (const QString &key, keys) {
+			if (key.size() > w)
+				w = key.size();
+			if (!order.contains(key))
+				XCA_WARN(tr("Property '%1' not listed in 'pki_base::print'").arg(key));
+		}
+		w = (w + 1) * -1;
+		foreach (const QString &key, order) {
+			if (!prp.contains(key))
+				continue;
+
+			bba += QString(COL_YELL "%1" COL_RESET " %2\n")
+				.arg(key + ":", w).arg(prp[key]).toUtf8();
+		}
+	}
 }
 
 static QString icsValue(QString s)
@@ -402,10 +463,7 @@ static QString icsValue(QString s)
 QStringList pki_base::icsVEVENT(const a1time &expires,
 	const QString &summary, const QString &description) const
 {
-	QByteArray ba = i2d();
-	unsigned char md[MD5_DIGEST_LENGTH];
-	MD5((const unsigned char *)ba.constData(), ba.length(), md);
-	QString uniqueid = formatHash(md, MD5_DIGEST_LENGTH, false);
+	QString uniqueid = formatHash(Digest(i2d(), EVP_sha1()), "");
 	QString desc = icsValue(description + "\n----------\n" + comment);
 	QString alarm = Settings["ical_expiry"];
 	return QStringList() <<
@@ -413,13 +471,13 @@ QStringList pki_base::icsVEVENT(const a1time &expires,
 	"BEGIN:VEVENT" <<
 	QString("DTSTAMP:%1").arg(a1time().toString("yyyyMMdd'T'HHmmss'Z'")) <<
 	QString("UID:EXP-%1@xca.ovh").arg(uniqueid) <<
-	"STATUS:NEEDS-ACTION" <<
+	"STATUS:CONFIRMED" <<
 	QString("DTSTART:%1").arg(expires.toString("yyyyMMdd")) <<
 	"DURATION:P1D" <<
 	QString("SUMMARY:%1").arg(icsValue(summary)) <<
 	QString("DESCRIPTION:%1").arg(desc) <<
 	"BEGIN:VALARM" <<
-	"ACTION:EMAIL" <<
+	"ACTION:DISPLAY" <<
 	QString("SUMMARY:%1").arg(icsValue(summary)) <<
 	QString("DESCRIPTION:%1").arg(desc) <<
 	QString("TRIGGER:-P%1").arg(alarm) <<

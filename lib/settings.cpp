@@ -4,6 +4,7 @@
 #include "widgets/hashBox.h"
 #include "widgets/NewKey.h"
 #include <QDir>
+#include <QFile>
 #include <openssl/asn1.h>
 
 settings Settings;
@@ -29,13 +30,15 @@ settings::settings()
 	defaul["mandatory_dn"] = "";
 	defaul["explicit_dn"] = "C,ST,L,O,OU,CN,emailAddress";
 	defaul["string_opt"] = "MASK:0x2002";
-	defaul["workingdir"] = QDir::currentPath();
+	defaul["workingdir"] = getHomeDir() + "/";
 	defaul["default_hash"] = hashBox::getDefault();
 	defaul["ical_expiry"] = "1W";
 	defaul["cert_expiry"] = "80%";
 	defaul["serial_len"] = "64";
+	defaul["fp_separator"] = ":";
+	defaul["fp_digits"] = "2";
 
-	clear();
+	hostspecific << "pkcs11path" << "workingdir" << "mw_geometry";
 }
 
 void settings::clear()
@@ -54,7 +57,7 @@ void settings::setAction(const QString &key, const QString &value)
 	else if (key == "default_hash")
 		hashBox::setDefault(value);
 	else if (key == "defaultkey")
-		NewKey::setDefault(value);
+		NewKey::defaultjob = keyjob(value);
 	else if (key == "optionflags") {
 		XSqlQuery q;
 		Transaction;
@@ -85,9 +88,18 @@ void settings::load_settings()
 	XSqlQuery q("SELECT key_, value FROM settings");
 	while (q.next()) {
 		QString key = q.value(0).toString().simplified();
-		QString value = q.value(1).toString().simplified();
-		setAction(key, value);
-		db_keys << key;
+		QString value = q.value(1).toString();
+		QStringList l = key.split(":");
+		if (l.size() == 2 && l[1] != hostId())
+			continue;	// Skip key with non-matching host ID
+		if (l[0] == "workingdir") {
+			if (!QDir(value).exists())
+				continue; // Skip non-existing working-dir
+			if (!value.isEmpty() && !value.endsWith("/"))
+				value += "/";
+		}
+		db_keys << key;		// Key with host ID
+		setAction(l[0], value);	// Key without host ID
 	}
 	loaded = true;
 }
@@ -95,6 +107,11 @@ void settings::load_settings()
 QString settings::get(QString key)
 {
 	load_settings();
+	if (key == "schema" && QSqlDatabase::database().isOpen()) {
+		XSqlQuery q("SELECT value FROM settings WHERE key_='schema'");
+		if (q.first())
+			setAction("schema", q.value(0).toString());
+	}
 	return values.contains(key) ? values[key] : QString();
 }
 
@@ -102,11 +119,18 @@ void settings::set(QString key, QString value)
 {
 	XSqlQuery q;
 	load_settings();
+	QString origkey = key;
 
-	if (key == "workingdir")
-		value = QDir::toNativeSeparators(value);
-
-	if (db_keys.contains(key) && values[key] == value)
+	if (key == "workingdir") {
+		if (!QDir(value).exists())
+			return;
+		value = relativePath(value);
+		if (!value.isEmpty() && !value.endsWith("/"))
+			value += "/";
+	}
+	if (hostspecific.contains(key))
+		key += QString(":%1").arg(hostId());
+	if (db_keys.contains(key) && values[origkey] == value)
 		return;
 
 	Transaction;
@@ -122,6 +146,6 @@ void settings::set(QString key, QString value)
 	q.bindValue(0, value);
 	q.bindValue(1, key);
 	q.exec();
-	setAction(key, value);
+	setAction(origkey, value);
 	TransCommit();
 }

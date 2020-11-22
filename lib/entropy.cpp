@@ -13,20 +13,13 @@
 #include <string.h>
 #include <errno.h>
 
-#include <QFile>
 #include <QDir>
 #include <QDebug>
 #include <openssl/rand.h>
 #include "func.h"
+#include "xfile.h"
 #include "entropy.h"
 #include "openssl_compat.h"
-
-#if defined(Q_OS_WIN32)
-/* On Windows O_NONBLOCK is an unknown concept :-)
- * We don't need it anyway on that platform ....
- */
-#define O_NONBLOCK 0
-#endif
 
 /* Entropy sources for XCA
  *
@@ -48,7 +41,7 @@
  *    all say it does not harm.
  *
  *    Entropy by Mouse and keyboard events
- *    main.cpp: bool XCA_application::eventFilter()
+ *    main.cpp: bool XcaApplication::eventFilter()
  *    256bit from /dev/urandom (unix/Mac)
  *
  * 3) A .rnd state file in the XCA application directory
@@ -65,8 +58,20 @@
 #define pool_siz (sizeof(pool)/sizeof(pool[0]))
 unsigned char Entropy::pool[512];
 unsigned Entropy::pool_pos = 0;
-QTime Entropy::timer;
+QElapsedTimer Entropy::timer;
 unsigned Entropy::seed_strength = 0;
+
+QString Entropy::makeSalt(void)
+{
+	QString s = "T";
+	unsigned char rand[8];
+
+	Entropy::get(rand, sizeof rand);
+	for (unsigned i=0; i< sizeof rand; i++)
+		s += QString("%1").arg(rand[i]);
+	return s;
+}
+
 
 void Entropy::add(int rand)
 {
@@ -113,15 +118,23 @@ int Entropy::random_from_file(QString fname, unsigned amount, int weakness)
 {
 	char buf[256];
 	int fd, sum;
-	QByteArray ba = filename2bytearray(fname);
-	const char *file = ba.constData();
 
-	/* OpenSSL: RAND_load_file() is blocking */
-	fd = open(file, O_RDONLY | O_NONBLOCK);
-
+	/* OpenSSL: RAND_load_file() is blocking
+	 * and does not support wchar_t */
+	XFile file(fname);
+	try {
+		file.open_read();
+	} catch (errorEx &e) {
+		qDebug() << "random_from_file" << fname << e.getString();
+		return 0;
+	}
+	fd = file.handle();
 	if (fd == -1)
 		return 0;
-
+#if !defined(Q_OS_WIN32)
+	if (fcntl(fd, F_SETFL, O_NONBLOCK) == -1)
+		return 0;
+#endif
 	for (sum=0; amount > 0;) {
 		int len = read(fd, buf, amount > sizeof buf ?
 					sizeof buf : amount);
@@ -134,15 +147,14 @@ int Entropy::random_from_file(QString fname, unsigned amount, int weakness)
 		if (len == -1) {
 			if (errno != EWOULDBLOCK)
 				qWarning("Error '%s' while reading '%s'\n",
-					strerror(errno), file);
+					strerror(errno), CCHAR(fname));
 			len = 0;
 		}
 		if (len == 0)
 			break;
 	}
-	close(fd);
 #ifdef DEBUG_ENTROPY
-	qDebug("Entropy from file '%s' = %d bytes", file, sum);
+	qDebug("Entropy from file '%s' = %d bytes", CCHAR(fname), sum);
 #endif
 	return sum;
 }
@@ -156,7 +168,7 @@ Entropy::Entropy()
 {
 	timer.start();
 
-	rnd = getUserSettingsDir() + QDir::separator() + ".rnd";
+	rnd = getUserSettingsDir() + "/.rnd";
 	random_from_file(rnd, 1024, 128);
 	QFile::remove(rnd); // don't use it again
 
@@ -171,8 +183,21 @@ Entropy::Entropy()
 
 Entropy::~Entropy()
 {
-	QByteArray ba = filename2bytearray(rnd);
-	RAND_write_file(ba.constData());
+#define RAND_BUF_SIZE 1024
+	unsigned char buf[RAND_BUF_SIZE];
+
+	if (RAND_bytes(buf, RAND_BUF_SIZE) == 1) {
+		XFile file(rnd);
+		try {
+			file.open_key();
+			file.write((char*)buf, RAND_BUF_SIZE);
+		} catch (errorEx &e) {
+			qDebug() << "random_from_file" << rnd
+				 << e.getString();
+		}
+		file.close();
+	}
+	memset(buf, 0, RAND_BUF_SIZE);
 #ifdef DEBUG_ENTROPY
 	qDebug("Seed strength: %d", seed_strength);
 #endif

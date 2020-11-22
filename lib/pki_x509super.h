@@ -1,6 +1,6 @@
 /* vi: set sw=4 ts=4:
  *
- * Copyright (C) 2001 - 2011 Christian Hohnstaedt.
+ * Copyright (C) 2001 - 2020 Christian Hohnstaedt.
  *
  * All rights reserved.
  */
@@ -18,12 +18,17 @@
 
 class pki_x509name : public pki_base
 {
+    protected:
+	void PEM_file_comment(XFile &file) const;
+
     public:
-	pki_x509name(const QString name = "");
+	pki_x509name(const QString &name = QString());
+	pki_x509name(const pki_x509name *n);
 	virtual x509name getSubject() const = 0;
-	void autoIntName();
+	void autoIntName(const QString &file);
 	QVariant column_data(const dbheader *hd) const;
 	bool visible() const;
+	void collect_properties(QMap<QString, QString> &prp) const;
 };
 
 class pki_x509super : public pki_x509name
@@ -31,17 +36,17 @@ class pki_x509super : public pki_x509name
 		Q_OBJECT
 	protected:
 		QVariant keySqlId;
-		pki_key *privkey;
 		virtual int sigAlg() const = 0;
+		void collect_properties(QMap<QString, QString> &prp) const;
 	public:
-		pki_x509super(const QString name = "");
+		pki_x509super(const QString &name = QString());
+		pki_x509super(const pki_x509super *x);
 		virtual ~pki_x509super();
 		unsigned pubHash() const;
 		virtual pki_key *getPubKey() const = 0;
 		virtual extList getV3ext() const = 0;
 		virtual QString getSigAlg() const;
 		virtual const EVP_MD *getDigest();
-		static QPixmap *icon[1];
 		QVariant getKeySqlId()
 		{
 			return keySqlId;

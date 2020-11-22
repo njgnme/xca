@@ -12,6 +12,7 @@
 #include "clicklabel.h"
 #include "RevocationList.h"
 #include "OpenDb.h"
+#include "OidResolver.h"
 #include "lib/pki_crl.h"
 #include <QLabel>
 #include <QTextEdit>
@@ -24,7 +25,7 @@ CrlDetail::CrlDetail(MainWindow *mainwin)
 	setupUi(this);
 	setWindowTitle(XCA_TITLE);
 
-	image->setPixmap(*MainWindow::revImg);
+	image->setPixmap(QPixmap(":revImg"));
 	issuerSqlId = QVariant();
 }
 

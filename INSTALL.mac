@@ -1,14 +1,22 @@
 
-This is a short overview of how to build
-XCA for MAC OSX
+brew install pkg-config autoconf automake openssl qt libtool
 
-Please drop me a mail if you experience problems.
+cd xca-2.3.0
+./configure && make
 
- - Create a base directory "xca" and change into it
- - unpack xca here
- - download and install Qt5 in your home directory
- - edit xca-2.0.1/misc/build-mac.sh and adapt the QTDIR path
-   to point to your Qt5 installation path
- - create an empty file "build-libs"
- - execute xca-2.0.1/misc/build-mac.sh
-   This will download and compile openssl and libltdl and then compile xca
+
+# Compile SQL Drivers if necessary:
+
+brew install mariadb-connector-c postgresql unixodbc
+
+# Download Qt sources with the same version, currently:
+#   qtbase-everywhere-src-5.15.1
+
+./configure -recheck -sql-mysql -sql-odbc -sql-psql -opensource -confirm-license -feature-datestring \
+      MYSQL_LIBDIR=$(pkg-config --variable=prefix libmariadb)/lib/mariadb \
+      MYSQL_INCDIR=$(pkg-config --variable=prefix libmariadb)/include/mariadb/ \
+      MYSQL_LIBS="-lmariadb" \
+      PSQL_PREFIX=/usr/local/Cellar/postgresql/12.4/
+      ODBC_PREFIX=$(pkg-config --variable=prefix odbc)
+
+make sub-plugins

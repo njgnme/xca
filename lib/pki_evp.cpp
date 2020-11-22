@@ -1,6 +1,6 @@
 /* vi: set sw=4 ts=4:
  *
- * Copyright (C) 2001 - 2015 Christian Hohnstaedt.
+ * Copyright (C) 2001 - 2020 Christian Hohnstaedt.
  *
  * All rights reserved.
  */
@@ -11,16 +11,16 @@
 #include "func.h"
 #include "db.h"
 #include "entropy.h"
+#include "BioByteArray.h"
 #include "widgets/PwDialog.h"
+#include "widgets/XcaWarning.h"
+#include "widgets/XcaProgress.h"
 
 #include <openssl/rand.h>
 #include <openssl/evp.h>
 #include <openssl/pem.h>
 #include <openssl/pkcs12.h>
-
-#include <QProgressDialog>
-#include <QApplication>
-#include <QDir>
+#include <openssl/err.h>
 
 #include "openssl_compat.h"
 
@@ -28,8 +28,6 @@ Passwd pki_evp::passwd;
 Passwd pki_evp::oldpasswd;
 
 QString pki_evp::passHash = QString();
-
-QPixmap *pki_evp::icon[2]= { NULL, NULL };
 
 void pki_evp::init()
 {
@@ -87,30 +85,24 @@ bool pki_evp::sqlUpdatePrivateKey()
 	return false;
 }
 
-void pki_evp::generate(int bits, int type, QProgressBar *progress, int curve_nid)
+void pki_evp::generate(const keyjob &task)
 {
 	Entropy::seed_rng();
-
-#ifdef OPENSSL_NO_EC
-	(void)curve_nid;
-#endif
-	progress->setMinimum(0);
-	progress->setMaximum(100);
-	progress->setValue(50);
+	XcaProgress progress;
 
 #if OPENSSL_VERSION_NUMBER < 0x10100000L
 	BN_GENCB _bar, *bar = &_bar;
 #else
 	BN_GENCB *bar = BN_GENCB_new();
 #endif
-	BN_GENCB_set_old(bar, inc_progress_bar, progress);
+	BN_GENCB_set_old(bar, XcaProgress::inc, &progress);
 
-	switch (type) {
+	switch (task.ktype.type) {
 	case EVP_PKEY_RSA: {
 		RSA *rsakey = RSA_new();
 		BIGNUM *e = BN_new();
 		BN_set_word(e, 0x10001);
-		if (RSA_generate_key_ex(rsakey, bits, e, bar))
+		if (RSA_generate_key_ex(rsakey, task.size, e, bar))
 			EVP_PKEY_assign_RSA(key, rsakey);
 		else
 			RSA_free(rsakey);
@@ -119,9 +111,8 @@ void pki_evp::generate(int bits, int type, QProgressBar *progress, int curve_nid
 	}
 	case EVP_PKEY_DSA: {
 		DSA *dsakey = DSA_new();
-		progress->setMaximum(500);
-		if (DSA_generate_parameters_ex(dsakey, bits, NULL, 0, NULL,
-		    NULL, bar) && DSA_generate_key(dsakey))
+		if (DSA_generate_parameters_ex(dsakey, task.size, NULL, 0,
+			 NULL, NULL, bar) && DSA_generate_key(dsakey))
 				EVP_PKEY_assign_DSA(key, dsakey);
 		else
 			DSA_free(dsakey);
@@ -130,7 +121,7 @@ void pki_evp::generate(int bits, int type, QProgressBar *progress, int curve_nid
 #ifndef OPENSSL_NO_EC
 	case EVP_PKEY_EC:
 		EC_KEY *eckey;
-		EC_GROUP *group = EC_GROUP_new_by_curve_name(curve_nid);
+		EC_GROUP *group = EC_GROUP_new_by_curve_name(task.ec_nid);
 		if (!group)
 			break;
 		eckey = EC_KEY_new();
@@ -170,8 +161,8 @@ pki_evp::pki_evp(const pki_evp *pk)
 	encKey = pk->getEncKey();
 }
 
-pki_evp::pki_evp(const QString name, int type)
-	:pki_key(name)
+pki_evp::pki_evp(const QString &n, int type)
+	:pki_key(n)
 {
 	init();
 	EVP_PKEY_set_type(key, type);
@@ -229,54 +220,41 @@ pki_evp::pki_evp(EVP_PKEY *pkey)
 	set_EVP_PKEY(pkey);
 }
 
-void pki_evp::openssl_pw_error(QString fname)
+bool pki_evp::openssl_pw_error() const
 {
 	switch (ERR_peek_error() & 0xff000fff) {
 	case ERR_PACK(ERR_LIB_PEM, 0, PEM_R_BAD_DECRYPT):
 	case ERR_PACK(ERR_LIB_PEM, 0, PEM_R_BAD_PASSWORD_READ):
 	case ERR_PACK(ERR_LIB_EVP, 0, EVP_R_BAD_DECRYPT):
 		pki_ign_openssl_error();
-		throw errorEx(tr("Failed to decrypt the key (bad password) ")+
-				fname, getClassName(), E_PASSWD);
+		return true;
 	}
+	return false;
 }
 
-void pki_evp::set_EVP_PKEY(EVP_PKEY *pkey)
+void pki_evp::fromPEMbyteArray(const QByteArray &ba, const QString &name)
 {
-	if (!pkey)
-		return;
-	if (key)
-		EVP_PKEY_free(key);
-	key = pkey;
-	isPub = !EVP_PKEY_isPrivKey(key);
-	if (!isPub) {
-		bogusEncryptKey();
-	}
-	pki_openssl_error();
-}
-
-void pki_evp::fromPEMbyteArray(QByteArray &ba, QString name)
-{
-	BIO *bio = BIO_new_mem_buf(ba.data(), ba.length());
 	EVP_PKEY *pkey;
 	pass_info p(XCA_TITLE,
-		tr("Please enter the password to decrypt the private key.") +
-		" " + name);
-	pkey = PEM_read_bio_PrivateKey(bio, NULL, PwDialog::pwCallback, &p);
-	openssl_pw_error(name);
-	if (!pkey){
-		pki_ign_openssl_error();
-		BIO_free(bio);
-		bio = BIO_new_mem_buf(ba.data(), ba.length());
-		pkey = PEM_read_bio_PUBKEY(bio, NULL, PwDialog::pwCallback, &p);
-	}
-	BIO_free(bio);
+		tr("Please enter the password to decrypt the private key %1.")
+			.arg(name));
+	do {
+		pkey = PEM_read_bio_PrivateKey(BioByteArray(ba).ro(), NULL,
+						PwDialog::pwCallback, &p);
+		if (openssl_pw_error())
+			XCA_PASSWD_ERROR();
+		if (p.getResult() != pw_ok)
+			throw p.getResult();
+		if (pki_ign_openssl_error())
+			break;
+	} while (!pkey);
 
-	setIntName(rmslashdot(name));
-	set_EVP_PKEY(pkey);
-	autoIntName();
-	if (getIntName().isEmpty())
-		setIntName(rmslashdot(name));
+	if (!pkey) {
+		pki_ign_openssl_error();
+		pkey = PEM_read_bio_PUBKEY(BioByteArray(ba).ro(), NULL, NULL, 0);
+	}
+	pki_openssl_error();
+	set_EVP_PKEY(pkey, name);
 }
 
 static void search_ec_oid(EVP_PKEY *pkey)
@@ -299,7 +277,7 @@ static void search_ec_oid(EVP_PKEY *pkey)
 		return;
 	/* There is an EC_GROUP with a missing OID
 	 * because of explicit parameters */
-	foreach(builtin_curve curve, pki_key::builtinCurves) {
+	foreach(builtin_curve curve, builtinCurves) {
 		builtin = EC_GROUP_new_by_curve_name(curve.nid);
 		if (EC_GROUP_cmp(builtin, ec_group, NULL) == 0) {
 			EC_GROUP_set_curve_name((EC_GROUP *)ec_group, curve.nid);
@@ -314,81 +292,104 @@ static void search_ec_oid(EVP_PKEY *pkey)
 #endif
 }
 
-void pki_evp::fload(const QString fname)
+void pki_evp::set_EVP_PKEY(EVP_PKEY *pkey, QString name)
+{
+	if (!pkey)
+		return;
+	if (!verify(pkey)) {
+		pki_ign_openssl_error();
+		EVP_PKEY_free(pkey);
+		throw errorEx(tr("The key from file '%1' is incomplete or inconsistent.").arg(name));
+	}
+	if (key)
+		EVP_PKEY_free(key);
+	key = pkey;
+	isPub = !EVP_PKEY_isPrivKey(key);
+	if (!isPub)
+		bogusEncryptKey();
+	search_ec_oid(pkey);
+
+	autoIntName(name);
+	setFilename(name);
+	pki_openssl_error();
+}
+
+void pki_evp::fload(const QString &fname)
 {
 	pass_info p(XCA_TITLE, tr("Please enter the password to decrypt the private key from file:\n%1").
 		arg(compressFilename(fname)));
 	pem_password_cb *cb = PwDialog::pwCallback;
-	FILE *fp = fopen_read(fname);
-	EVP_PKEY *pkey;
 
 	pki_ign_openssl_error();
-	if (!fp) {
-		fopen_error(fname);
-		return;
-	}
-	pkey = PEM_read_PrivateKey(fp, NULL, cb, &p);
-	try {
-		openssl_pw_error(fname);
-	} catch (errorEx &err) {
-		fclose(fp);
-		throw err;
+	XFile file(fname);
+	file.open_read();
+	EVP_PKEY *pkey;
+	do {
+		pkey = PEM_read_PrivateKey(file.fp(), NULL, cb, &p);
+		if (openssl_pw_error())
+			XCA_PASSWD_ERROR();
+		if (p.getResult() != pw_ok)
+			throw p.getResult();
+		if (pki_ign_openssl_error())
+			break;
+		file.retry_read();
+	} while (!pkey);
+	if (!pkey) {
+		pki_ign_openssl_error();
+		file.retry_read();
+		pkey = d2i_PrivateKey_fp(file.fp(), NULL);
 	}
 	if (!pkey) {
 		pki_ign_openssl_error();
-		rewind(fp);
-		pkey = d2i_PrivateKey_fp(fp, NULL);
-	}
-	if (!pkey) {
-		pki_ign_openssl_error();
-		rewind(fp);
-		pkey = d2i_PKCS8PrivateKey_fp(fp, NULL, cb, &p);
+		file.retry_read();
+		pkey = d2i_PKCS8PrivateKey_fp(file.fp(), NULL, cb, &p);
 	}
 	if (!pkey) {
 		PKCS8_PRIV_KEY_INFO *p8inf;
 		pki_ign_openssl_error();
-		rewind(fp);
-		p8inf = d2i_PKCS8_PRIV_KEY_INFO_fp(fp, NULL);
+		file.retry_read();
+		p8inf = d2i_PKCS8_PRIV_KEY_INFO_fp(file.fp(), NULL);
 		if (p8inf) {
 			pkey = EVP_PKCS82PKEY(p8inf);
 			PKCS8_PRIV_KEY_INFO_free(p8inf);
 		}
 	}
+#if OPENSSL_VERSION_NUMBER >= 0x10000000L
 	if (!pkey) {
 		pki_ign_openssl_error();
-		rewind(fp);
-		pkey = PEM_read_PUBKEY(fp, NULL, cb, &p);
-	}
-	if (!pkey) {
-		pki_ign_openssl_error();
-		rewind(fp);
-		pkey = d2i_PUBKEY_fp(fp, NULL);
-	}
-	if (!pkey) {
-		pki_ign_openssl_error();
-                rewind(fp);
-		try {
-			pkey = load_ssh2_key(fp);
-		} catch (errorEx &err) {
-			fclose(fp);
-			throw err;
-		}
+		file.retry_read();
+		pkey = b2i_PVK_bio(file.bio(), cb, &p);
+		pki_openssl_error();
         }
-	fclose(fp);
-	if (!pkey || pki_ign_openssl_error()) {
+#endif
+	if (!pkey) {
+		pki_ign_openssl_error();
+		file.retry_read();
+		pkey = PEM_read_PUBKEY(file.fp(), NULL, cb, &p);
+	}
+	if (!pkey) {
+		pki_ign_openssl_error();
+		file.retry_read();
+		pkey = d2i_PUBKEY_fp(file.fp(), NULL);
+	}
+	if (!pkey) {
+		pki_ign_openssl_error();
+		file.retry_read();
+		pkey = load_ssh2_key(file);
+        }
+#if OPENSSL_VERSION_NUMBER >= 0x10000000L
+	if (!pkey) {
+		pki_ign_openssl_error();
+		file.retry_read();
+		pkey = b2i_PublicKey_bio(file.bio());
+        }
+#endif
+	if (pki_ign_openssl_error() || !pkey) {
 		if (pkey)
 			EVP_PKEY_free(pkey);
 		throw errorEx(tr("Unable to load the private key in file %1. Tried PEM and DER private, public, PKCS#8 key types and SSH2 format.").arg(fname));
 	}
-	if (pkey){
-		search_ec_oid(pkey);
-		if (key)
-			EVP_PKEY_free(key);
-		key = pkey;
-		if (EVP_PKEY_isPrivKey(key))
-			bogusEncryptKey();
-		setIntName(rmslashdot(fname));
-	}
+	set_EVP_PKEY(pkey, fname);
 }
 
 void pki_evp::fromData(const unsigned char *p, db_header_t *head)
@@ -443,11 +444,13 @@ EVP_PKEY *pki_evp::decryptKey() const
 		ownPassBuf = "Bogus";
 	} else {
 		ownPassBuf = passwd;
-		while (sha512passwT(ownPassBuf, passHash) != passHash &&
-			sha512passwd(ownPassBuf, passHash) != passHash)
+		while (passHash.isEmpty() ||
+			(sha512passwT(ownPassBuf, passHash) != passHash &&
+			 sha512passwd(ownPassBuf, passHash) != passHash))
 		{
 			pass_info p(XCA_TITLE, tr("Please enter the database password for decrypting the key '%1'").arg(getIntName()));
-			ret = PwDialog::execute(&p, &ownPassBuf, false);
+			ret = PwDialog::execute(&p, &ownPassBuf,
+							passHash.isEmpty());
 			if (ret != 1)
 				throw errorEx(tr("Password input aborted"),
 						getClassName());
@@ -457,10 +460,8 @@ EVP_PKEY *pki_evp::decryptKey() const
 	qDebug() << "myencKey.count()"<<myencKey.count();
 	if (myencKey.count() == 0)
 		return NULL;
-	BIO *b = BIO_from_QByteArray(myencKey);
-	check_oom(b);
 	EVP_PKEY *priv = NULL;
-	X509_SIG *p8 = d2i_PKCS8_bio(b, NULL);
+	X509_SIG *p8 = d2i_PKCS8_bio(BioByteArray(myencKey).ro(), NULL);
 	if (p8) {
 		PKCS8_PRIV_KEY_INFO *p8inf = PKCS8_decrypt(p8,
 				ownPassBuf.constData(), ownPassBuf.size());
@@ -470,7 +471,6 @@ EVP_PKEY *pki_evp::decryptKey() const
 		}
 		X509_SIG_free(p8);
 	}
-	BIO_free(b);
 	if (priv)
 		return priv;
 	pki_ign_openssl_error();
@@ -581,10 +581,12 @@ void pki_evp::encryptKey(const char *password)
 			int ret = 0;
 			ownPassBuf = passwd;
 			pass_info p(XCA_TITLE, tr("Please enter the database password for encrypting the key"));
-			while (sha512passwT(ownPassBuf, passHash) != passHash &&
-				sha512passwd(ownPassBuf, passHash) != passHash)
+			while (passHash.isEmpty() ||
+				(sha512passwT(ownPassBuf, passHash) != passHash &&
+				 sha512passwd(ownPassBuf, passHash) != passHash))
 			{
-				ret = PwDialog::execute(&p, &ownPassBuf, false);
+				ret = PwDialog::execute(&p, &ownPassBuf,
+							passHash.isEmpty());
 				if (ret != 1)
 					throw errorEx("Password input aborted",
 							getClassName());
@@ -593,14 +595,11 @@ void pki_evp::encryptKey(const char *password)
 	}
 
 	/* Convert private key to DER(PKCS8-aes) */
-	const char *p;
-	BIO *bio = BIO_new(BIO_s_mem());
-	i2d_PKCS8PrivateKey_bio(bio, key, EVP_aes_256_cbc(),
+	BioByteArray bba;
+	i2d_PKCS8PrivateKey_bio(bba, key, EVP_aes_256_cbc(),
 		ownPassBuf.data(), ownPassBuf.size(), NULL, 0);
 	pki_openssl_error();
-	int l = BIO_get_mem_data(bio, &p);
-	encKey = QByteArray(p, l);
-	BIO_free(bio);
+	encKey = bba;
 
 	/* Replace private key by public key and
 	   have the encrypted private in "encKey"
@@ -689,40 +688,65 @@ QSqlError pki_evp::deleteSqlData()
 	return q.lastError();
 }
 
-void pki_evp::writePKCS8(const QString fname, const EVP_CIPHER *enc,
-		pem_password_cb *cb, bool pem)
+void pki_evp::writePKCS8(XFile &file, const EVP_CIPHER *enc,
+		pem_password_cb *cb, bool pem) const
 {
-	EVP_PKEY *pkey;
-	pass_info p(XCA_TITLE, tr("Please enter the password protecting the PKCS#8 key '%1'").arg(getIntName()));
-	FILE *fp = fopen_write_key(fname);
-	if (fp != NULL) {
-		if (key) {
-			pkey = decryptKey();
-			if (pkey) {
-				if (pem)
-					PEM_write_PKCS8PrivateKey(fp, pkey, enc, NULL, 0, cb, &p);
-				else
-					i2d_PKCS8PrivateKey_fp(fp, pkey, enc, NULL, 0, cb, &p);
-				EVP_PKEY_free(pkey);
-			}
-		}
-		fclose(fp);
+	pass_info p(XCA_TITLE,
+		tr("Please enter the password protecting the PKCS#8 key '%1'")
+			.arg(getIntName()));
+	EVP_PKEY *pkey = decryptKey();
+	if (!pkey) {
 		pki_openssl_error();
-	} else
-		fopen_error(fname);
+		return;
+	}
+	if (pem) {
+		PEM_file_comment(file);
+		PEM_write_PKCS8PrivateKey(file.fp(), pkey, enc, NULL, 0,cb,&p);
+	} else {
+		i2d_PKCS8PrivateKey_fp(file.fp(), pkey, enc, NULL, 0, cb, &p);
+	}
+	EVP_PKEY_free(pkey);
 }
 
+void pki_evp::writePVKprivate(XFile &file, pem_password_cb *cb) const
+{
+#if OPENSSL_VERSION_NUMBER >= 0x10000000L
+	pass_info p(XCA_TITLE, tr("Please enter the password protecting the Microsoft PVK key '%1'").arg(getIntName()));
+
+	int enc = cb ? 2 /* pvk-strong */ : 0 /* pvk-none */;
+	EVP_PKEY *pkey = decryptKey();
+	if (!pkey) {
+		pki_openssl_error();
+		return;
+	}
+	/* In case of success! the error
+	 *   PEMerr(PEM_F_I2B_PVK_BIO, PEM_R_BIO_WRITE_FAILURE)
+	 * is set. Workaround this behavior */
+	if (i2b_PVK_bio(file.bio(), pkey, enc, cb, &p) == -1) {
+		pki_openssl_error();
+		PEMerr(PEM_F_I2B_PVK_BIO, PEM_R_BIO_WRITE_FAILURE);
+		pki_openssl_error();
+	}
+	ign_openssl_error();
+	EVP_PKEY_free(pkey);
+#else
+	(void)file;
+	(void)cb;
+	throw errorEx("Internal Error");
+#endif
+}
 static int mycb(char *buf, int size, int, void *)
 {
 	strncpy(buf, pki_evp::passwd, size);
 	return strlen(pki_evp::passwd);
 }
 
-void pki_evp::writeDefault(const QString fname)
+void pki_evp::writeDefault(const QString &dirname) const
 {
-	writeKey(get_dump_filename(fname, ".pem"),
-		pki_evp::passwd[0] ? EVP_des_ede3_cbc() : NULL,
-		mycb, true);
+	XFile file(get_dump_filename(dirname, ".pem"));
+	file.open_key();
+	writeKey(file, pki_evp::passwd[0] ? EVP_des_ede3_cbc() : NULL,
+			mycb, true);
 }
 
 #if OPENSSL_VERSION_NUMBER < 0x10100000L || defined LIBRESSL_VERSION_NUMBER
@@ -731,141 +755,111 @@ int PEM_write_bio_PrivateKey_traditional(BIO *bp, EVP_PKEY *x,
                                          unsigned char *kstr, int klen,
                                          pem_password_cb *cb, void *u)
 {
-	const char *t = "";
-	int keytype = EVP_PKEY_id(x);
+	QString pem = keytype::byPKEY(x).traditionalPemName();
 
-	switch (keytype) {
-		case EVP_PKEY_RSA: t = "RSA PRIVATE KEY"; break;
-		case EVP_PKEY_DSA: t = "DSA PRIVATE KEY"; break;
-#ifndef OPENSSL_NO_EC
-		case EVP_PKEY_EC: t = "EC PRIVATE KEY"; break;
-#endif
-	}
 	return PEM_ASN1_write_bio((i2d_of_void *)i2d_PrivateKey,
-				t, bp, (char*)x, enc, kstr, klen, cb, u);
+			pem.toLatin1(), bp, (char*)x, enc, kstr, klen, cb, u);
 }
 #endif
 
-void pki_evp::writeKey(const QString fname, const EVP_CIPHER *enc,
-			pem_password_cb *cb, bool pem)
+void pki_evp::writeKey(XFile &file, const EVP_CIPHER *enc,
+			pem_password_cb *cb, bool pem) const
 {
-	pass_info p(XCA_TITLE, tr("Please enter the export password for the private key '%1'").arg(getIntName()));
+	pass_info p(XCA_TITLE,
+		tr("Please enter the export password for the private key '%1'")
+			.arg(getIntName()));
 
 	if (isPubKey()) {
-		writePublic(fname, pem);
-		return;
-	}
-	FILE *fp = fopen_write_key(fname);
-	if (!fp) {
-		fopen_error(fname);
+		writePublic(file, pem);
 		return;
 	}
 	EVP_PKEY *pkey = key ? decryptKey() : NULL;
 	if (!pkey) {
-		fclose(fp);
 	        pki_openssl_error();
 		return;
 	}
 	if (pem) {
-		BIO *b = BIO_new_fp(fp, BIO_NOCLOSE);
-		if (!b) {
-			EVP_PKEY_free(pkey);
-			fclose(fp);
-			return;
-		}
-		PEM_write_bio_PrivateKey_traditional(b, pkey, enc,
+		PEM_file_comment(file);
+		PEM_write_bio_PrivateKey_traditional(file.bio(), pkey, enc,
 						NULL, 0, cb, &p);
-		BIO_free(b);
 	} else {
-		i2d_PrivateKey_fp(fp, pkey);
+		i2d_PrivateKey_fp(file.fp(), pkey);
 	}
-	fclose(fp);
-	pki_openssl_error();
 	EVP_PKEY_free(pkey);
+	pki_openssl_error();
 }
 
-int pki_evp::verify()
+bool pki_evp::verify_priv(EVP_PKEY *pkey) const
 {
-	bool veri = false;
-	return true;
-	if (getKeyType() == EVP_PKEY_RSA && isPrivKey()) {
-		RSA *rsa = EVP_PKEY_get0_RSA(key);
-		if (RSA_check_key(rsa) == 1)
-			veri = true;
+	bool verify = true;
+#if OPENSSL_VERSION_NUMBER >= 0x10000000L
+	unsigned char md[32], sig[1024];
+	size_t mdlen = sizeof md, siglen = sizeof sig;
+	EVP_PKEY_CTX *ctx = NULL;
+
+	if (!EVP_PKEY_isPrivKey(pkey))
+		return true;
+	do {
+		ctx = EVP_PKEY_CTX_new(pkey, NULL);
+		pki_ign_openssl_error();
+		RAND_bytes(md, mdlen);
+		check_oom(ctx);
+		verify = false;
+
+		/* Sign some random data in "md" */
+		if (EVP_PKEY_sign_init(ctx) <= 0)
+			break;
+		if (EVP_PKEY_id(pkey) == EVP_PKEY_RSA)
+			EVP_PKEY_CTX_set_rsa_padding(ctx, RSA_PKCS1_PADDING);
+		if (EVP_PKEY_CTX_set_signature_md(ctx, EVP_sha256()) <= 0)
+			break;
+		if (EVP_PKEY_sign(ctx, sig, &siglen, md, mdlen) <= 0)
+			break;
+		/* Verify the signature */
+		if (EVP_PKEY_verify_init(ctx) <= 0)
+			break;
+		if (EVP_PKEY_verify(ctx, sig, siglen, md, mdlen) <= 0)
+			break;
+		verify = true;
+	} while (0);
+	if (ctx)
+		EVP_PKEY_CTX_free(ctx);
+#endif
+	if (EVP_PKEY_id(pkey) == EVP_PKEY_RSA && EVP_PKEY_isPrivKey(pkey)) {
+		RSA *rsa = EVP_PKEY_get0_RSA(pkey);
+		if (RSA_check_key(rsa) != 1)
+			verify = false;
 	}
-	if (isPrivKey())
-		veri = true;
 	pki_openssl_error();
-	return veri;
+	return verify;
 }
 
 QVariant pki_evp::getIcon(const dbheader *hd) const
 {
 	if (hd->id != HD_internal_name)
 		return QVariant();
-	int pixnum= isPubKey() ? 1 : 0;
-	return QVariant(*icon[pixnum]);
+
+	return QVariant(QPixmap(isPubKey() ? ":pubkeyIco" : ":keyIco"));
 }
 
 QString pki_evp::md5passwd(QByteArray pass)
 {
-
-#if OPENSSL_VERSION_NUMBER < 0x10100000L
-	EVP_MD_CTX mdctxbuf;
-#endif
-	EVP_MD_CTX *mdctx;
-	int n;
-	unsigned char m[EVP_MAX_MD_SIZE];
-
-#if OPENSSL_VERSION_NUMBER >= 0x10100000L
-	mdctx = EVP_MD_CTX_new();
-#else
-	mdctx = &mdctxbuf;
-#endif
-
-	EVP_DigestInit(mdctx, EVP_md5());
-	EVP_DigestUpdate(mdctx, pass.constData(), pass.size());
-	EVP_DigestFinal(mdctx, m, (unsigned*)&n);
-
-#if OPENSSL_VERSION_NUMBER >= 0x10100000L
-	EVP_MD_CTX_free(mdctx);
-#endif
-	return formatHash(m, n);
+	return formatHash(Digest(pass, EVP_md5()));
 }
 
 QString pki_evp::_sha512passwd(QByteArray pass, QString salt,
 				int size, int repeat)
 {
-#if OPENSSL_VERSION_NUMBER < 0x10100000L
-	EVP_MD_CTX mdctxbuf;
-#endif
-	EVP_MD_CTX *mdctx;
-	QString str;
-	int n;
-	unsigned char m[EVP_MAX_MD_SIZE];
+	if (salt.length() < size)
+		return QString();
 
-	if (salt.length() < size) {
-		abort();
-	}
-	str = salt.left(size);
-	pass = str.toLatin1() + pass;
+	salt = salt.left(size);
+	pass = salt.toLatin1() + pass;
 
-#if OPENSSL_VERSION_NUMBER >= 0x10100000L
-	mdctx = EVP_MD_CTX_new();
-#else
-	mdctx = &mdctxbuf;
-#endif
-	while (repeat--) {
-		EVP_DigestInit(mdctx, EVP_sha512());
-		EVP_DigestUpdate(mdctx, pass.constData(), pass.size());
-		EVP_DigestFinal(mdctx, m, (unsigned*)&n);
-		pass = QByteArray((char*)m, n);
+	while (repeat--)
+		pass = Digest(pass, EVP_sha512());
 
-	}
-#if OPENSSL_VERSION_NUMBER >= 0x10100000L
-	EVP_MD_CTX_free(mdctx);
-#endif
-	return str + formatHash(m, n, false);
+	return salt + formatHash(pass, "");
 }
 
 QString pki_evp::sha512passwd(QByteArray pass, QString salt)

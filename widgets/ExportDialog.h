@@ -11,7 +11,6 @@
 #include "ui_ExportDialog.h"
 #include "lib/pki_base.h"
 
-class MainWindow;
 class QPixmap;
 
 class exportType {
@@ -22,7 +21,7 @@ class exportType {
 		PEM_key, PEM_private, PEM_private_encrypt, DER_private,
 		DER_key, PKCS8, PKCS8_encrypt, SSH2_public,
 		PEM_selected, PKCS7_selected, Index, vcalendar, vcalendar_ca,
-		ETYPE_max };
+		PVK_private, PVK_encrypt, ETYPE_max };
 	enum etype type;
 	QString desc;
 	QString extension;
@@ -30,6 +29,23 @@ class exportType {
 		type = t; extension = e; desc = d;
 	}
 	exportType() { type = Separator; }
+	bool isPEM() const {
+		switch (type) {
+		case PEM:
+		case PEM_chain:
+		case PEM_unrevoked:
+		case PEM_all:
+		case PEM_cert_key:
+		case PEM_cert_pk8:
+		case PEM_key:
+		case PEM_private:
+		case PEM_private_encrypt:
+		case PEM_selected:
+			return true;
+		default:
+			return false;
+		}
+	}
 };
 Q_DECLARE_METATYPE(exportType);
 
@@ -39,12 +55,11 @@ class ExportDialog: public QDialog, public Ui::ExportDialog
 
    protected:
 	QString filter;
-	MainWindow *mainwin;
 	QVector<QString> help;
 
    public:
-	ExportDialog(MainWindow *mw, QString title, QString filt,
-			pki_base *pki, QPixmap *img, QList<exportType> types);
+	ExportDialog(QWidget *mw, const QString &title, const QString &filt,
+		     pki_base *pki, const QPixmap &img, QList<exportType> types);
 	static bool mayWriteFile(const QString &fname);
 	enum exportType::etype type();
 

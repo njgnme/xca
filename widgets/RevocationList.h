@@ -30,13 +30,14 @@ class RevocationList: public QDialog, public Ui::RevocationList
 		const x509revList &getRevList();
 
 	public slots:
-		void on_addRev_clicked(void);
-		void on_delRev_clicked(void);
-		void on_editRev_clicked(void);
-		void gencrl(void);
+		void on_addRev_clicked();
+		void on_delRev_clicked();
+		void on_editRev_clicked();
+		void gencrl();
+		void on_certList_itemDoubleClicked(QTreeWidgetItem *);
 
 	signals:
-		void genCRL(pki_x509 *iss);
+		void genCRL(pki_x509 *);
 };
 
 class Revocation: public QDialog, public Ui::Revoke

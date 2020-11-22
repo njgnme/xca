@@ -1,6 +1,6 @@
 /* vi: set sw=4 ts=4:
  *
- * Copyright (C) 2001 - 2011 Christian Hohnstaedt.
+ * Copyright (C) 2001 - 2020 Christian Hohnstaedt.
  *
  * All rights reserved.
  */
@@ -9,28 +9,33 @@
 #include <typeinfo>
 
 #include "pki_x509.h"
+#include "pki_x509req.h"
 #include "pki_evp.h"
 #include "func.h"
 #include "db_base.h"
 #include "x509name.h"
 #include "exception.h"
 #include <openssl/bio.h>
-#include <openssl/err.h>
-#include <QDir>
 
 #include "openssl_compat.h"
 
-QPixmap *pki_x509req::icon[3] = { NULL, NULL, NULL };
-
-pki_x509req::pki_x509req(const QString name)
+pki_x509req::pki_x509req(const QString &name)
 	: pki_x509super(name)
 {
-	privkey = NULL;
 	request = X509_REQ_new();
 	pki_openssl_error();
 	pkiType=x509_req;
 	done = false;
 	resetX509count();
+}
+
+pki_x509req::pki_x509req(const pki_x509req *req)
+	: pki_x509super(req)
+{
+	request = X509_REQ_dup(request);
+	done = req->done;
+	resetX509count();
+	pki_openssl_error();
 }
 
 pki_x509req::~pki_x509req()
@@ -62,7 +67,7 @@ void pki_x509req::markSigned(bool signe)
 	TransThrow();
 
 	SQL_PREPARE(q, "UPDATE requests SET signed=? WHERE item=?");
-	q.bindValue(0, signe);
+	q.bindValue(0, signe ? 1 : 0);
 	q.bindValue(1, sqlItemId);
 	q.exec();
 
@@ -153,7 +158,7 @@ QString pki_x509req::getMsg(msg_type msg) const
 	return pki_base::getMsg(msg);
 }
 
-void pki_x509req::fromPEM_BIO(BIO *bio, QString name)
+void pki_x509req::fromPEM_BIO(BIO *bio, const QString &name)
 {
 	X509_REQ *req;
 	req = PEM_read_bio_X509_REQ(bio, NULL, NULL, NULL);
@@ -162,38 +167,25 @@ void pki_x509req::fromPEM_BIO(BIO *bio, QString name)
 	request = req;
 }
 
-void pki_x509req::fload(const QString fname)
+void pki_x509req::fload(const QString &fname)
 {
-	FILE *fp = fopen_read(fname);
 	X509_REQ *_req;
-	int ret = 0;
-
-	if (fp != NULL) {
-		_req = PEM_read_X509_REQ(fp, NULL, NULL, NULL);
-		if (!_req) {
-			pki_ign_openssl_error();
-			rewind(fp);
-			_req = d2i_X509_REQ_fp(fp, NULL);
-		}
-		fclose(fp);
-		if (ret || pki_ign_openssl_error()) {
-			if (_req)
-				X509_REQ_free(_req);
-			throw errorEx(tr("Unable to load the certificate request in file %1. Tried PEM, DER and SPKAC format.").arg(fname));
-		}
-	} else {
-		fopen_error(fname);
-		return;
+	XFile file(fname);
+	file.open_read();
+	_req = PEM_read_X509_REQ(file.fp(), NULL, NULL, NULL);
+	if (!_req) {
+		pki_ign_openssl_error();
+		file.retry_read();
+		_req = d2i_X509_REQ_fp(file.fp(), NULL);
+	}
+	if (pki_ign_openssl_error() || !_req) {
+		if (_req)
+			X509_REQ_free(_req);
+		throw errorEx(tr("Unable to load the certificate request in file %1. Tried PEM, DER and SPKAC format.").arg(fname));
 	}
 
-	if (_req) {
-		X509_REQ_free(request);
-		request = _req;
-	}
-	autoIntName();
-	if (getIntName().isEmpty())
-		setIntName(rmslashdot(fname));
-	openssl_error(fname);
+	X509_REQ_free(request);
+	request = _req;
 }
 
 void pki_x509req::d2i(QByteArray &ba)
@@ -215,9 +207,7 @@ void pki_x509req::fromData(const unsigned char *p, db_header_t *head )
 	int size;
 
 	size = head->len - sizeof(db_header_t);
-
 	QByteArray ba((const char *)p, size);
-	privkey = NULL;
 
 	d2i(ba);
 	pki_openssl_error();
@@ -255,37 +245,32 @@ void pki_x509req::setSubject(const x509name &n)
 	X509_REQ_set_subject_name(request, n.get());
 }
 
-void pki_x509req::writeDefault(const QString fname)
+void pki_x509req::writeDefault(const QString &dirname) const
 {
-	writeReq(get_dump_filename(fname, ".csr"), true);
+	XFile file(get_dump_filename(dirname, ".csr"));
+	file.open_write();
+	writeReq(file, true);
 }
 
-void pki_x509req::writeReq(const QString fname, bool pem)
+void pki_x509req::writeReq(XFile &file, bool pem) const
 {
-	FILE *fp = fopen_write(fname);
-	if (fp) {
-		if (request){
-			if (pem)
-				PEM_write_X509_REQ(fp, request);
-			else
-				i2d_X509_REQ_fp(fp, request);
-		}
-		fclose(fp);
-		pki_openssl_error();
-	} else
-		fopen_error(fname);
+	if (!request)
+		return;
+	if (pem) {
+		PEM_file_comment(file);
+		PEM_write_X509_REQ(file.fp(), request);
+	} else {
+		i2d_X509_REQ_fp(file.fp(), request);
+	}
+	pki_openssl_error();
 }
 
-BIO *pki_x509req::pem(BIO *b, int format)
+bool pki_x509req::pem(BioByteArray &b, int)
 {
-	(void)format;
-	if (!b)
-		b = BIO_new(BIO_s_mem());
-	PEM_write_bio_X509_REQ(b, request);
-	return b;
+	return PEM_write_bio_X509_REQ(b, request);
 }
 
-int pki_x509req::verify() const
+bool pki_x509req::verify() const
 {
 	EVP_PKEY *pkey = X509_REQ_get_pubkey(request);
 	bool x = X509_REQ_verify(request,pkey) > 0;
@@ -342,30 +327,53 @@ int pki_x509req::issuedCerts() const
 	if (x509count != -1)
 		return x509count;
 
-	SQL_PREPARE(q, "SELECT item FROM x509super WHERE key_hash=?");
-	q.bindValue(0, pubHash());
-	q.exec();
-	if (q.lastError().isValid())
-		return 0;
 	pki_key *k = getPubKey();
 	if (!k)
 		return 0;
-	while (q.next()) {
-		pki_x509super *x;
-		x = db_base::lookupPki<pki_x509super>(q.value(0));
-		if (!x) {
-			qDebug("x509 with id %d not found",
-				q.value(0).toInt());
-			continue;
-		}
-		if (typeid(*x) == typeid(pki_x509) && x->compareRefKey(k))
+	QList<pki_x509 *> certs = Store.sqlSELECTpki<pki_x509>(
+		"SELECT item FROM x509super LEFT JOIN items ON items.id = x509super.item "
+		"WHERE key_hash=? AND items.type=?",
+		QList<QVariant>() << QVariant(pubHash()) << QVariant(x509));
+
+	foreach(pki_x509 *x, certs) {
+		if (x->compareRefKey(k))
 			count++;
+
 		qDebug() << "Req:" << getIntName() << "Cert with hash"
 			 << x->getIntName() << count;
 	}
 	delete k;
 	x509count = count;
 	return count;
+}
+
+void pki_x509req::collect_properties(QMap<QString, QString> &prp) const
+{
+	QString s = getAttribute(NID_pkcs9_unstructuredName);
+	if (!s.isEmpty())
+		prp["Unstructured Name"] = s;
+
+	s = getAttribute(NID_pkcs9_challengePassword);
+	if (!s.isEmpty())
+		prp["Challange Password"] = s;
+
+	pki_x509super::collect_properties(prp);
+	prp["Verify Ok"] = verify() ? "Yes" : "No";
+}
+
+void pki_x509req::print(BioByteArray &bba, enum print_opt opt) const
+{
+	pki_x509super::print(bba, opt);
+	switch (opt) {
+	case print_openssl_txt:
+		X509_REQ_print(bba, request);
+		break;
+	case print_pem:
+		PEM_write_bio_X509_REQ(bba, request);
+		break;
+	case print_coloured:
+		break;
+	}
 }
 
 QVariant pki_x509req::column_data(const dbheader *hd) const
@@ -385,22 +393,17 @@ QVariant pki_x509req::column_data(const dbheader *hd) const
 
 QVariant pki_x509req::getIcon(const dbheader *hd) const
 {
-	int pixnum = -1;
-
 	switch (hd->id) {
 	case HD_internal_name:
-		pixnum = hasPrivKey() ? 0 : 1;
-		break;
+		return QVariant(QPixmap(hasPrivKey() ? ":reqkeyIco" : ":reqIco"));
 	case HD_req_signed:
 		if (done)
-			pixnum = 2;
+			return QVariant(QPixmap(":doneIco"));
 		break;
 	default:
 		return pki_x509super::getIcon(hd);
 	}
-	if (pixnum == -1)
-		return QVariant();
-	return QVariant(*icon[pixnum]);
+	return QVariant();
 }
 
 bool pki_x509req::visible() const

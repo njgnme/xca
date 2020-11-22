@@ -1,6 +1,6 @@
 /* vi: set sw=4 ts=4:
  *
- * Copyright (C) 2001 - 2012 Christian Hohnstaedt.
+ * Copyright (C) 2001 - 2020 Christian Hohnstaedt.
  *
  * All rights reserved.
  */
@@ -9,23 +9,36 @@
 #include "pki_crl.h"
 #include "func.h"
 #include "exception.h"
-#include "db_base.h"
+#include "database_model.h"
 #include <QDir>
 
 #include "openssl_compat.h"
 
-QPixmap *pki_crl::icon = NULL;
-
 pki_crl::pki_crl(const QString name )
 	:pki_x509name(name)
 {
-	issuer = NULL;
 	crl = X509_CRL_new();
 	pki_openssl_error();
 	pkiType=revocation;
 }
 
-void pki_crl::fromPEM_BIO(BIO *bio, QString name)
+pki_x509 *pki_crl::getIssuer() const
+{
+	return Store.lookupPki<pki_x509>(issuerSqlId);
+}
+
+QString pki_crl::getIssuerName() const
+{
+	pki_x509 *issuer = getIssuer();
+	return issuer ? issuer->getIntName() : QString();
+}
+
+void pki_crl::setIssuer(pki_x509 *iss)
+{
+	issuerSqlId = iss ? iss->getSqlItemId() : QVariant();
+}
+
+void pki_crl::fromPEM_BIO(BIO *bio, const QString &name)
 {
 	X509_CRL *_crl;
 	_crl = PEM_read_bio_X509_CRL(bio, NULL, NULL, NULL);
@@ -65,7 +78,7 @@ QSqlError pki_crl::lookupIssuer()
 	if (q.lastError().isValid())
 		return q.lastError();
 	while (q.next()) {
-		pki_x509 *x = db_base::lookupPki<pki_x509>(q.value(0));
+		pki_x509 *x = Store.lookupPki<pki_x509>(q.value(0));
 		if (!x) {
 			qDebug("CA certificate with id %d not found",
 				q.value(0).toInt());
@@ -90,7 +103,7 @@ QSqlError pki_crl::insertSqlData()
 	q.bindValue(1, hash());
 	q.bindValue(2, numRev());
 	q.bindValue(3, (uint)getSubject().hashNum());
-	q.bindValue(4, issuer ? issuer->getSqlItemId() : QVariant());
+	q.bindValue(4, issuerSqlId);
 	q.bindValue(5, i2d_b64());
 	q.exec();
 	return q.lastError();
@@ -102,7 +115,7 @@ void pki_crl::restoreSql(const QSqlRecord &rec)
 	QByteArray ba = QByteArray::fromBase64(
 				rec.value(VIEW_crls_crl).toByteArray());
 	d2i(ba);
-	setIssuer(db_base::lookupPki<pki_x509>(rec.value(VIEW_crls_issuer)));
+	setIssuer(Store.lookupPki<pki_x509>(rec.value(VIEW_crls_issuer)));
 }
 
 QSqlError pki_crl::deleteSqlData()
@@ -116,29 +129,24 @@ QSqlError pki_crl::deleteSqlData()
 	return q.lastError();
 }
 
-void pki_crl::fload(const QString fname)
+void pki_crl::fload(const QString &fname)
 {
-	FILE *fp = fopen_read(fname);
 	X509_CRL *_crl;
-	if (fp != NULL) {
-		_crl = PEM_read_X509_CRL(fp, NULL, NULL, NULL);
-		if (!_crl) {
-			pki_ign_openssl_error();
-			rewind(fp);
-			_crl = d2i_X509_CRL_fp(fp, NULL);
-		}
-		fclose(fp);
-		if (pki_ign_openssl_error()) {
-			if (_crl)
-				X509_CRL_free(_crl);
-			throw errorEx(tr("Unable to load the revocation list in file %1. Tried PEM and DER formatted CRL.").arg(fname));
-		}
-		X509_CRL_free(crl);
-		crl = _crl;
-		setIntName(rmslashdot(fname));
-		pki_openssl_error();
-	} else
-		fopen_error(fname);
+	XFile file(fname);
+	file.open_read();
+	_crl = PEM_read_X509_CRL(file.fp(), NULL, NULL, NULL);
+	if (!_crl) {
+		pki_ign_openssl_error();
+		file.retry_read();
+		_crl = d2i_X509_CRL_fp(file.fp(), NULL);
+	}
+	if (pki_ign_openssl_error() || !_crl) {
+		if (_crl)
+			X509_CRL_free(_crl);
+		throw errorEx(tr("Unable to load the revocation list in file %1. Tried PEM and DER formatted CRL.").arg(fname));
+	}
+	X509_CRL_free(crl);
+	crl = _crl;
 }
 
 QString pki_crl::getSigAlg() const
@@ -146,15 +154,14 @@ QString pki_crl::getSigAlg() const
 	return QString(OBJ_nid2ln(X509_CRL_get_signature_nid(crl)));
 }
 
-void pki_crl::createCrl(const QString d, pki_x509 *iss )
+void pki_crl::createCrl(const QString d, pki_x509 *iss)
 {
 	setIntName(d);
-	issuer = iss;
 	if (!iss)
 		my_error(tr("No issuer given"));
 	X509_CRL_set_version(crl, 1); /* version 2 CRL */
-	X509_CRL_set_issuer_name(crl, (X509_NAME*)issuer->getSubject().get0());
-
+	X509_CRL_set_issuer_name(crl, (X509_NAME*)iss->getSubject().get0());
+	setIssuer(iss);
 	pki_openssl_error();
 }
 
@@ -256,32 +263,27 @@ void pki_crl::sign(pki_key *key, const EVP_MD *md)
 	pki_openssl_error();
 }
 
-void pki_crl::writeDefault(const QString fname)
+void pki_crl::writeDefault(const QString &dirname) const
 {
-	writeCrl(fname + QDir::separator() + getUnderlinedName() + ".crl", true);
+	XFile file(get_dump_filename(dirname, ".crl"));
+	file.open_write();
+	writeCrl(file, true);
 }
 
-void pki_crl::writeCrl(const QString fname, bool pem)
+void pki_crl::writeCrl(XFile &file, bool pem) const
 {
-	FILE *fp = fopen_write(fname);
-	if (fp != NULL) {
-		if (pem)
-			PEM_write_X509_CRL(fp, crl);
-		else
-			i2d_X509_CRL_fp(fp, crl);
-		fclose(fp);
-		pki_openssl_error();
-	} else
-		fopen_error(fname);
+	if (pem) {
+		PEM_file_comment(file);
+		PEM_write_X509_CRL(file.fp(), crl);
+	} else {
+		i2d_X509_CRL_fp(file.fp(), crl);
+	}
+	pki_openssl_error();
 }
 
-BIO *pki_crl::pem(BIO *b, int format)
+bool pki_crl::pem(BioByteArray &b, int)
 {
-	(void)format;
-	if (!b)
-		b = BIO_new(BIO_s_mem());
-	PEM_write_bio_X509_CRL(b, crl);
-	return b;
+	return PEM_write_bio_X509_CRL(b, crl);
 }
 
 a1time pki_crl::getLastUpdate() const
@@ -395,10 +397,7 @@ QVariant pki_crl::column_data(const dbheader *hd) const
 {
 	switch (hd->id) {
 		case HD_crl_signer:
-			if (issuer)
-				return QVariant(getIssuerName());
-			else
-				return QVariant(tr("unknown"));
+			return QVariant(getIssuerName());
 		case HD_crl_revoked:
 			return QVariant(numRev());
 		case HD_crl_crlnumber:
@@ -423,19 +422,52 @@ a1time pki_crl::column_a1time(const dbheader *hd) const
 
 QVariant pki_crl::getIcon(const dbheader *hd) const
 {
-	return hd->id == HD_internal_name ? QVariant(*icon) : QVariant();
+	return hd->id == HD_internal_name ?
+			QVariant(QPixmap(":crlIco")) : QVariant();
 }
 
 QStringList pki_crl::icsVEVENT() const
 {
+	pki_x509 *ca = getIssuer();
+	if (ca) {
+		return pki_base::icsVEVENT(getNextUpdate(),
+		tr("CRL Renewal of CA '%1' due").arg(ca->getIntName()),
+		tr("The latest CRL issued by the CA '%1' will expire on %2.\n"
+		  "It is stored in the XCA database '%3'")
+			.arg(ca->getIntName())
+			.arg(getNextUpdate().toPretty())
+			.arg(Database.name())
+		);
+	}
 	return pki_base::icsVEVENT(getNextUpdate(),
 		tr("Renew CRL: %1").arg(getIntName()),
-		tr("The XCA CRL '%1', issued by the CA '%2' on %3 will expire on %4.\n"
+		tr("The XCA CRL '%1', issued on %3 will expire on %4.\n"
 		  "It is stored in the XCA database '%5'")
 			.arg(getIntName())
-			.arg(issuer ? getIssuerName() : QString())
 			.arg(getLastUpdate().toPretty())
 			.arg(getNextUpdate().toPretty())
-			.arg(currentDB)
+			.arg(Database.name())
 	);
+}
+
+void pki_crl::collect_properties(QMap<QString, QString> &prp) const
+{
+	prp["Last Update"] = getLastUpdate().toPretty();
+	prp["Next Update"] = getNextUpdate().toPretty();
+	pki_x509name::collect_properties(prp);
+}
+
+void pki_crl::print(BioByteArray &bba, enum print_opt opt) const
+{
+	pki_x509name::print(bba, opt);
+	switch (opt) {
+	case print_openssl_txt:
+		X509_CRL_print(bba, crl);
+		break;
+	case print_pem:
+		PEM_write_bio_X509_CRL(bba, crl);
+		break;
+	case print_coloured:
+		break;
+	}
 }

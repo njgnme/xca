@@ -17,10 +17,10 @@ void ReqTreeView::fillContextMenu(QMenu *menu, QMenu *subExport,
 {
 	X509SuperTreeView::fillContextMenu(menu, subExport, index, indexes);
 
-	if (indexes.size() != 1)
-		return;
+	pki_x509req *req = db_base::fromIndex<pki_x509req>(index);
 
-	pki_x509req *req = static_cast<pki_x509req*>(index.internalPointer());
+	if (indexes.size() != 1 || !req)
+		return;
 
 	menu->addAction(tr("Sign"), this, SLOT(signReq()));
 	if (req->getDone())
@@ -35,26 +35,28 @@ void ReqTreeView::fillContextMenu(QMenu *menu, QMenu *subExport,
 	}
 }
 
-void ReqTreeView::toRequest()
-{
-	if (reqs)
-		reqs->toRequest(currentIndex());
-}
-
 void ReqTreeView::signReq()
 {
-	if (reqs)
-		reqs->signReq(currentIndex());
+	pki_x509req *req = db_base::fromIndex<pki_x509req>(currentIndex());
+	db_x509 *certs = Database.model<db_x509>();
+	certs->newCert(req);
+}
+
+void ReqTreeView::toRequest()
+{
+	pki_x509req *req = db_base::fromIndex<pki_x509req>(currentIndex());
+	if (basemodel)
+		reqs()->newItem(NULL, req);
 }
 
 void ReqTreeView::markSigned()
 {
-	if (reqs)
-		reqs->setSigned(currentIndex(), true);
+	if (basemodel)
+		reqs()->setSigned(currentIndex(), true);
 }
 
 void ReqTreeView::unmarkSigned()
 {
-	if (reqs)
-		reqs->setSigned(currentIndex(), false);
+	if (basemodel)
+		reqs()->setSigned(currentIndex(), false);
 }

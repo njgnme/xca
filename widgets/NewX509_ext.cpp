@@ -1,6 +1,6 @@
 /* vi: set sw=4 ts=4:
  *
- * Copyright (C) 2001 - 2012 Christian Hohnstaedt.
+ * Copyright (C) 2001 - 2020 Christian Hohnstaedt.
  *
  * All rights reserved.
  */
@@ -16,6 +16,7 @@
 
 #include "MainWindow.h"
 #include "lib/x509v3ext.h"
+#include "lib/BioByteArray.h"
 #include "lib/func.h"
 
 #include "lib/openssl_compat.h"
@@ -49,6 +50,20 @@ x509v3ext NewX509::getSubKeyIdent()
 }
 
 
+x509v3ext NewX509::getOCSPstaple()
+{
+	x509v3ext ext;
+	if (OCSPstaple->isChecked())
+		ext.create(NID_tlsfeature,
+#ifdef NID_tlsfeature
+			"status_request",
+#else
+			"DER:30:03:02:01:05",
+#endif
+			&ext_ctx);
+	return ext;
+}
+
 x509v3ext NewX509::getAuthKeyIdent()
 {
 	x509v3ext ext;
@@ -73,9 +88,8 @@ x509v3ext NewX509::getKeyUsage()
 
 	int rows = keyUsage->count();
 	for (int i=0; i<rows; i++) {
-		if (keyUsage->isItemSelected(keyUsage->item(i))) {
+		if (keyUsage->item(i)->isSelected())
 			cont << keyusage[i];
-		}
 	}
 	if (kuCritical->isChecked() && cont.count() > 0)
 		cont.prepend("critical");
@@ -90,11 +104,8 @@ x509v3ext NewX509::getEkeyUsage()
 
 	int rows = ekeyUsage->count();
 	for (int i=0; i<rows; i++) {
-		//QListWidgetItem *li = ekeyUsage->item(i);
-		//printf("rows = %d, ekeyUsage = %d, %p\n", rows, i, li);
-		if (ekeyUsage->isItemSelected(ekeyUsage->item(i))) {
-			cont << QString(OBJ_nid2sn(eku_nid[i]));
-		}
+		if (ekeyUsage->item(i)->isSelected())
+			cont << QString(OBJ_nid2sn(extkeyuse_nid[i]));
 	}
 	if (ekuCritical->isChecked() && cont.count() > 0)
 		cont.prepend("critical");
@@ -143,45 +154,11 @@ x509v3ext NewX509::getCrlDist()
 	return ext;
 }
 
-QString NewX509::getAuthInfAcc_string()
-{
-	QString rval="";
-	QString aia_txt	= authInfAcc->text();
-	aia_txt = aia_txt.trimmed();
-
-	if (!aia_txt.isEmpty()) {
-		rval = OBJ_nid2sn(aia_nid[aiaOid->currentIndex()]);
-		rval += ";" + aia_txt;
-	}
-	openssl_error();
-	return rval;
-}
-
-void NewX509::setAuthInfAcc_string(QString aia_txt)
-{
-	int nid, idx;
-
-	idx = aia_txt.indexOf(';');
-	if (idx == -1)
-		return;
-
-	nid = OBJ_txt2nid(CCHAR(aia_txt.left(idx)));
-
-	for (int i=0; i < aia_nid.count(); i++) {
-		if (aia_nid[i] == nid) {
-			aiaOid->setCurrentIndex(i);
-		}
-	}
-	authInfAcc->setText(aia_txt.mid(idx +1));
-}
-
 x509v3ext NewX509::getAuthInfAcc()
 {
 	x509v3ext ext;
-	QString aia_txt = getAuthInfAcc_string();
-
-	if (!aia_txt.isEmpty()) {
-		ext.create(NID_info_access, aia_txt, &ext_ctx);
+	if (!authInfAcc->text().isEmpty()) {
+		ext.create(NID_info_access, authInfAcc->text(), &ext_ctx);
 	}
 	return ext;
 }
@@ -190,7 +167,6 @@ extList NewX509::getAdvanced()
 {
 	QString conf_str;
 	CONF *conf;
-	BIO *bio;
 	extList elist;
 	long err_line=0;
 	STACK_OF(X509_EXTENSION) **sk, *sk_tmp = NULL;
@@ -206,14 +182,10 @@ extList NewX509::getAdvanced()
 	if (conf_str.isEmpty())
 		return elist;
 
-	QByteArray cs = conf_str.toLatin1();
-	bio = BIO_new_mem_buf(cs.data(), cs.length());
-	if (!bio)
-		return elist;
 	conf = NCONF_new(NULL);
-	ret = NCONF_load_bio(conf, bio, &err_line);
+	ret = NCONF_load_bio(conf, BioByteArray(conf_str.toLatin1()).ro(),
+				&err_line);
 	if (ret != 1) {
-		BIO_free(bio);
 		openssl_error(tr("Configfile error on line %1\n").
 				arg(err_line));
 		return elist;
@@ -246,7 +218,6 @@ extList NewX509::getAdvanced()
 
 	X509V3_set_nconf(&ext_ctx, NULL);
 	NCONF_free(conf);
-	BIO_free(bio);
 	openssl_error();
 	return elist;
 }
@@ -264,6 +235,7 @@ extList NewX509::getGuiExt()
 	ne << getIssAltName();
 	ne << getCrlDist();
 	ne << getAuthInfAcc();
+	ne << getOCSPstaple();
 	openssl_error();
 	return ne;
 }
@@ -291,9 +263,8 @@ extList NewX509::getNetscapeExt()
 
 	int rows = nsCertType->count();
 	for (int i=0; i<rows; i++) {
-		if (nsCertType->isItemSelected(nsCertType->item(i))) {
-			cont <<  certTypeList[i];
-		}
+		if (nsCertType->item(i)->isSelected())
+			cont << certTypeList[i];
 	}
 
 	el << ext.create(NID_netscape_cert_type, cont.join(", "), &ext_ctx);
